@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import type { ProcessPriority } from '../../types/skyos.types';
-import { X, PlusCircle, AlertCircle, Cpu, MemoryStick, Shield } from 'lucide-react';
+import { X, PlusCircle, AlertCircle, Cpu, MemoryStick, Shield, Clock } from 'lucide-react';
 
 interface CreateProcessModalProps {
   isOpen: boolean;
@@ -21,6 +21,7 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
   const [priority, setPriority] = useState<ProcessPriority>('MEDIUM');
   const [memoryUsageMb, setMemoryUsageMb] = useState<string>('64');
   const [cpuUsagePct, setCpuUsagePct] = useState<string>('5.0');
+  const [burstTotal, setBurstTotal] = useState<string>('10');
   const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -48,17 +49,25 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
       return;
     }
 
+    const burst = parseInt(burstTotal, 10);
+    if (isNaN(burst) || burst <= 0) {
+      setValidationError('La duración (ticks) debe ser un número entero mayor a 0.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
       // IMPORTANTE: NO enviamos id ni pid; la base de datos los genera automáticamente.
-      // El proceso nace en estado NEW.
+      // El proceso nace en estado NEW con burst_total y burst_remaining asignados.
       const payload: Record<string, any> = {
         name: trimmedName,
         priority,
         memory_usage_mb: mem,
         cpu_usage_pct: Number(cpu.toFixed(2)),
         status: 'NEW',
+        burst_total: burst,
+        burst_remaining: burst,
       };
 
       if (description.trim()) {
@@ -102,6 +111,7 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
       setPriority('MEDIUM');
       setMemoryUsageMb('64');
       setCpuUsagePct('5.0');
+      setBurstTotal('10');
       onClose();
     } catch (err: any) {
       console.error('[SkyOS Process Create] Excepción:', err);
@@ -261,8 +271,8 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
             </select>
           </div>
 
-          {/* Grid: Memoria y CPU */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.85rem' }}>
+          {/* Grid: Memoria, CPU y Duración (ticks) */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
             {/* Memoria */}
             <div>
               <label style={{
@@ -270,13 +280,13 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
                 alignItems: 'center',
                 gap: '0.4rem',
                 fontFamily: 'var(--font-mono)',
-                fontSize: '0.72rem',
+                fontSize: '0.7rem',
                 color: 'var(--text-tactical)',
                 marginBottom: '0.35rem',
-                letterSpacing: '0.06em'
+                letterSpacing: '0.04em'
               }}>
                 <MemoryStick size={13} />
-                MEMORIA REQUERIDA (MB) *
+                MEMORIA (MB) *
               </label>
               <input
                 type="number"
@@ -297,13 +307,13 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
                 alignItems: 'center',
                 gap: '0.4rem',
                 fontFamily: 'var(--font-mono)',
-                fontSize: '0.72rem',
+                fontSize: '0.7rem',
                 color: 'var(--text-tactical)',
                 marginBottom: '0.35rem',
-                letterSpacing: '0.06em'
+                letterSpacing: '0.04em'
               }}>
                 <Cpu size={13} />
-                CPU REQUERIDA (%) *
+                CPU (%) *
               </label>
               <input
                 type="number"
@@ -315,6 +325,33 @@ export const CreateProcessModal: React.FC<CreateProcessModalProps> = ({
                 onChange={(e) => setCpuUsagePct(e.target.value)}
                 className="hud-input"
                 placeholder="5.0"
+              />
+            </div>
+
+            {/* Duración (ticks) */}
+            <div>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.7rem',
+                color: 'var(--text-tactical)',
+                marginBottom: '0.35rem',
+                letterSpacing: '0.04em'
+              }}>
+                <Clock size={13} />
+                DURACIÓN (TICKS) *
+              </label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                required
+                value={burstTotal}
+                onChange={(e) => setBurstTotal(e.target.value)}
+                className="hud-input"
+                placeholder="10"
               />
             </div>
           </div>

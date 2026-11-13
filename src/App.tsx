@@ -6,6 +6,8 @@ import { AppLayout } from './components/Layout/AppLayout';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { Processes } from './pages/Processes';
+import { Kernel } from './pages/Kernel';
+import { Memory } from './pages/Memory';
 
 export const App: React.FC = () => {
   return (
@@ -21,6 +23,8 @@ export const App: React.FC = () => {
               <Route path="/" element={<Dashboard />} />
               <Route path="/dashboard" element={<Navigate to="/" replace />} />
               <Route path="/processes" element={<Processes />} />
+              <Route path="/kernel" element={<Kernel />} />
+              <Route path="/memoria" element={<Memory />} />
             </Route>
           </Route>
 

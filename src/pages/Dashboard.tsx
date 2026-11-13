@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import type { Process, Device, SystemEvent, SystemResources, OverallSystemStatus } from '../types/skyos.types';
+import type { Process, Device, SystemEvent, SystemResources, OverallSystemStatus, MemoryBlock } from '../types/skyos.types';
 import { MetricCard } from '../components/Dashboard/MetricCard';
 import { OverallStatusBanner } from '../components/Dashboard/OverallStatusBanner';
 import { ProcessesTable } from '../components/Dashboard/ProcessesTable';
@@ -11,6 +11,7 @@ export const Dashboard: React.FC = () => {
   const [processes, setProcesses] = useState<Process[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [events, setEvents] = useState<SystemEvent[]>([]);
+  const [memoryBlocks, setMemoryBlocks] = useState<MemoryBlock[]>([]);
   const [resources, setResources] = useState<SystemResources>({
     total_memory_mb: 1024,
     total_storage_gb: 64,
@@ -94,15 +95,33 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
+  // 5. Cargar memory_blocks (Regla 7)
+  const fetchMemoryBlocks = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('memory_blocks')
+        .select('*');
+
+      if (error) {
+        console.error('[SkyOS Realtime] Error cargando memory_blocks:', error.message);
+      } else if (data) {
+        setMemoryBlocks(data as MemoryBlock[]);
+      }
+    } catch (err) {
+      console.error('[SkyOS Realtime] Error inesperado en memory_blocks:', err);
+    }
+  }, []);
+
   // Carga conjunta inicial
   const loadAllData = useCallback(async () => {
     await Promise.all([
       fetchProcesses(),
       fetchDevices(),
       fetchEvents(),
-      fetchResourcesSettings()
+      fetchResourcesSettings(),
+      fetchMemoryBlocks()
     ]);
-  }, [fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings]);
+  }, [fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings, fetchMemoryBlocks]);
 
   const handleManualRefresh = async () => {
     setRefreshing(true);
@@ -153,6 +172,13 @@ export const Dashboard: React.FC = () => {
           fetchResourcesSettings();
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'memory_blocks' },
+        () => {
+          fetchMemoryBlocks();
+        }
+      )
       .subscribe((status) => {
         if (!isMounted) return;
         if (status === 'SUBSCRIBED') {
@@ -166,7 +192,7 @@ export const Dashboard: React.FC = () => {
       isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [loadAllData, fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings]);
+  }, [loadAllData, fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings, fetchMemoryBlocks]);
 
   // ==========================================
   // CÁLCULOS DE LAS 4 TARJETAS CON PROGRESO
@@ -177,10 +203,9 @@ export const Dashboard: React.FC = () => {
   const cpuRunningTotal = runningProcesses.reduce((sum, p) => sum + Number(p.cpu_usage_pct || 0), 0);
   const cpuPercentage = Math.min(100, Math.max(0, cpuRunningTotal));
 
-  // 2. Memoria: suma de memory_usage_mb de los procesos que NO estén en NEW ni TERMINATED,
-  // dividida entre total_memory_mb (system_settings -> resources)
-  const activeMemoryProcesses = processes.filter((p) => p.status !== 'NEW' && p.status !== 'TERMINATED');
-  const usedMemoryMb = activeMemoryProcesses.reduce((sum, p) => sum + Number(p.memory_usage_mb || 0), 0);
+  // 2. Memoria: SUMA de size_mb de memory_blocks (en vez de sumar memory_usage_mb de los procesos),
+  // dividida entre total_memory_mb (system_settings -> resources) [Regla 7]
+  const usedMemoryMb = memoryBlocks.reduce((sum, b) => sum + Number(b.size_mb || 0), 0);
   const totalMemoryMb = resources.total_memory_mb || 1024;
   const memoryPercentage = totalMemoryMb > 0 ? (usedMemoryMb / totalMemoryMb) * 100 : 0;
 
@@ -293,10 +318,10 @@ export const Dashboard: React.FC = () => {
           title="Memoria RAM Asignada"
           value={`${usedMemoryMb} MB`}
           percentage={memoryPercentage}
-          subtitle={`Límite: ${totalMemoryMb} MB (${activeMemoryProcesses.length} procesos)`}
+          subtitle={`Límite: ${totalMemoryMb} MB (${memoryBlocks.length} bloques en memory_blocks)`}
           icon={MemoryStick}
           colorScheme={memoryPercentage > 80 ? 'crimson' : memoryPercentage > 60 ? 'amber' : 'emerald'}
-          auxInfo="NO TERMINATED/NEW"
+          auxInfo="FIRST-FIT CONTIGUO"
         />
 
         {/* Batería */}

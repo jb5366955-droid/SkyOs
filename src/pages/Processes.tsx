@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import type { Process, ProcessStatus } from '../types/skyos.types';
+import type { Process, ProcessStatus, SystemState } from '../types/skyos.types';
 import { CreateProcessModal } from '../components/Processes/CreateProcessModal';
 import { RlsAlerts } from '../components/Processes/RlsAlerts';
 import {
@@ -27,6 +27,7 @@ export const Processes: React.FC = () => {
   const { role } = useAuth();
 
   const [processes, setProcesses] = useState<Process[]>([]);
+  const [systemState, setSystemState] = useState<SystemState | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
@@ -42,6 +43,25 @@ export const Processes: React.FC = () => {
   // Filtros de búsqueda
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+
+  // ==========================================
+  // CARGA DE ESTADO DEL KERNEL
+  // ==========================================
+  const fetchSystemState = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('system_state')
+        .select('*')
+        .eq('id', 1)
+        .single();
+
+      if (!error && data) {
+        setSystemState(data as SystemState);
+      }
+    } catch (err) {
+      console.error('[SkyOS Processes] Error al leer system_state:', err);
+    }
+  }, []);
 
   // ==========================================
   // CARGA DE PROCESOS DESDE SUPABASE
@@ -70,14 +90,14 @@ export const Processes: React.FC = () => {
   };
 
   // ==========================================
-  // REALTIME SUBSCRIPTION (processes)
+  // REALTIME SUBSCRIPTION (processes & system_state)
   // ==========================================
   useEffect(() => {
     let isMounted = true;
 
     async function init() {
       setLoading(true);
-      await fetchProcesses();
+      await Promise.all([fetchProcesses(), fetchSystemState()]);
       if (isMounted) setLoading(false);
     }
 
@@ -94,6 +114,18 @@ export const Processes: React.FC = () => {
           fetchProcesses();
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'system_state' },
+        (payload) => {
+          console.log('[SkyOS Realtime] Cambio detectado en system_state:', payload.eventType);
+          if (payload.new) {
+            setSystemState(payload.new as SystemState);
+          } else {
+            fetchSystemState();
+          }
+        }
+      )
       .subscribe((status) => {
         if (!isMounted) return;
         if (status === 'SUBSCRIBED') {
@@ -107,7 +139,7 @@ export const Processes: React.FC = () => {
       isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [fetchProcesses]);
+  }, [fetchProcesses, fetchSystemState]);
 
   // Auto-limpieza del mensaje de éxito después de 6 segundos
   useEffect(() => {
@@ -130,11 +162,17 @@ export const Processes: React.FC = () => {
     setSuccessMessage(null);
 
     try {
+      // Preparar (NEW -> READY) guarda arrival_tick = tick actual
+      const updatePayload: Record<string, any> = { status: targetStatus };
+      if (proc.status === 'NEW' && targetStatus === 'READY') {
+        updatePayload.arrival_tick = systemState?.tick ?? 0;
+      }
+
       // Requisito 4: Después de cada update usa .select() y revisa cuántas filas se modificaron.
       // Si fueron 0 o hay error, muestra un aviso rojo "ACCESO DENEGADO: el usuario no tiene permisos suficientes".
       const { data, error } = await supabase
         .from('processes')
-        .update({ status: targetStatus })
+        .update(updatePayload)
         .eq('id', proc.id)
         .select();
 
@@ -542,21 +580,22 @@ export const Processes: React.FC = () => {
                 <th style={{ padding: '0.65rem 0.75rem' }}>PROCESO / SUBSISTEMA</th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '120px' }}>ESTADO</th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '100px' }}>PRIORIDAD</th>
-                <th style={{ padding: '0.65rem 0.75rem', width: '90px', textAlign: 'right' }}>CPU (%)</th>
-                <th style={{ padding: '0.65rem 0.75rem', width: '100px', textAlign: 'right' }}>MEMORIA</th>
+                <th style={{ padding: '0.65rem 0.75rem', width: '120px', textAlign: 'center' }}>RÁFAGA (TICKS)</th>
+                <th style={{ padding: '0.65rem 0.75rem', width: '85px', textAlign: 'right' }}>CPU (%)</th>
+                <th style={{ padding: '0.65rem 0.75rem', width: '90px', textAlign: 'right' }}>MEMORIA</th>
                 <th style={{ padding: '0.65rem 0.75rem', textAlign: 'right', minWidth: '220px' }}>ACCIONES (TRANSICIONES)</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
+                  <td colSpan={8} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
                     Leyendo tabla de control de procesos desde Supabase...
                   </td>
                 </tr>
               ) : filteredProcesses.length === 0 ? (
                 <tr>
-                  <td colSpan={7} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
+                  <td colSpan={8} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
                     No se encontraron procesos que coincidan con el filtro actual.
                   </td>
                 </tr>
@@ -656,7 +695,40 @@ export const Processes: React.FC = () => {
                         </span>
                       </td>
 
-                      {/* 5. CPU */}
+                      {/* 5. Ráfaga / Duración (ticks) */}
+                      <td style={{ padding: '0.75rem', textAlign: 'center' }}>
+                        {proc.is_daemon ? (
+                          <span style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.68rem',
+                            color: 'var(--cyan-primary)',
+                            padding: '0.15rem 0.4rem',
+                            backgroundColor: 'rgba(0, 229, 255, 0.08)',
+                            border: '1px solid rgba(0, 229, 255, 0.25)',
+                            borderRadius: '2px'
+                          }}>
+                            DAEMON ∞
+                          </span>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+                            <span style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: '0.75rem',
+                              fontWeight: 600,
+                              color: (proc.burst_remaining ?? proc.burst_total ?? 10) === 0 ? 'var(--text-dim)' : '#f8fafc'
+                            }}>
+                              {proc.burst_remaining ?? proc.burst_total ?? 10} / {proc.burst_total ?? 10}
+                            </span>
+                            {proc.arrival_tick !== undefined && proc.arrival_tick !== null && (
+                              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.62rem', color: 'var(--text-dim)' }}>
+                                Llegada: T#{proc.arrival_tick}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* 6. CPU */}
                       <td style={{
                         padding: '0.75rem',
                         textAlign: 'right',
@@ -668,7 +740,7 @@ export const Processes: React.FC = () => {
                         {Number(proc.cpu_usage_pct).toFixed(1)}%
                       </td>
 
-                      {/* 6. Memoria */}
+                      {/* 7. Memoria */}
                       <td style={{
                         padding: '0.75rem',
                         textAlign: 'right',
@@ -679,7 +751,7 @@ export const Processes: React.FC = () => {
                         {proc.memory_usage_mb} MB
                       </td>
 
-                      {/* 7. Acciones por fila (Transiciones válidas) */}
+                      {/* 8. Acciones por fila (Transiciones válidas) */}
                       <td style={{ padding: '0.75rem', textAlign: 'right' }}>
                         {/* Requisito 6: Los procesos TERMINATED se ven atenuados y sin acciones */}
                         {isTerminated ? (
@@ -727,23 +799,47 @@ export const Processes: React.FC = () => {
                                 onClick={() => executeProcessAction(proc, 'READY', 'Preparar')}
                                 disabled={isBusy}
                                 className="btn-action btn-action-preparar"
-                                title="Preparar proceso: NEW -> READY"
+                                title="Preparar proceso: NEW -> READY (registra arrival_tick)"
                               >
                                 <RotateCw size={12} className={isBusy ? 'pulse-dot' : ''} />
                                 <span>PREPARAR</span>
                               </button>
                             )}
 
-                            {/* READY -> RUNNING */}
+                            {/* READY -> RUNNING (Controlado por el Scheduler y estado del Kernel) */}
                             {proc.status === 'READY' && (
                               <button
                                 onClick={() => executeProcessAction(proc, 'RUNNING', 'Ejecutar')}
-                                disabled={isBusy}
+                                disabled={
+                                  isBusy ||
+                                  systemState?.status === 'RUNNING' ||
+                                  systemState?.status === 'OFF' ||
+                                  systemState?.status === 'BOOTING'
+                                }
                                 className="btn-action btn-action-ejecutar"
-                                title="Ejecutar proceso: READY -> RUNNING"
+                                style={
+                                  systemState?.status === 'RUNNING' || systemState?.status === 'OFF' || systemState?.status === 'BOOTING'
+                                    ? { opacity: 0.6, cursor: 'not-allowed', filter: 'grayscale(0.4)' }
+                                    : undefined
+                                }
+                                title={
+                                  systemState?.status === 'RUNNING'
+                                    ? 'El kernel está RUNNING: la asignación de CPU la decide el scheduler automáticamente'
+                                    : systemState?.status === 'OFF'
+                                    ? 'Kernel apagado: ningún proceso de usuario puede ejecutarse'
+                                    : 'Ejecutar proceso: READY -> RUNNING'
+                                }
                               >
                                 <Play size={12} className={isBusy ? 'pulse-dot' : ''} />
-                                <span>EJECUTAR</span>
+                                <span>
+                                  {systemState?.status === 'RUNNING'
+                                    ? 'Lo decide el scheduler'
+                                    : systemState?.status === 'OFF'
+                                    ? 'Kernel apagado'
+                                    : systemState?.status === 'BOOTING'
+                                    ? 'Iniciando kernel...'
+                                    : 'EJECUTAR'}
+                                </span>
                               </button>
                             )}
 
@@ -760,13 +856,13 @@ export const Processes: React.FC = () => {
                               </button>
                             )}
 
-                            {/* WAITING -> RUNNING */}
+                            {/* WAITING -> READY (Reanudar manda a READY, no a RUNNING) */}
                             {proc.status === 'WAITING' && (
                               <button
-                                onClick={() => executeProcessAction(proc, 'RUNNING', 'Reanudar')}
+                                onClick={() => executeProcessAction(proc, 'READY', 'Reanudar')}
                                 disabled={isBusy}
                                 className="btn-action btn-action-reanudar"
-                                title="Reanudar proceso: WAITING -> RUNNING"
+                                title="Reanudar proceso: WAITING -> READY"
                               >
                                 <Play size={12} className={isBusy ? 'pulse-dot' : ''} />
                                 <span>REANUDAR</span>

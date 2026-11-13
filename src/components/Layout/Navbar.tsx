@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers } from 'lucide-react';
+import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers, MemoryStick } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const { user, profile, role, signOut, loading } = useAuth();
@@ -118,6 +118,22 @@ export const Navbar: React.FC = () => {
         >
           <Layers size={15} />
           <span>PROCESOS</span>
+        </NavLink>
+        <NavLink
+          to="/kernel"
+          className={({ isActive }) => `hud-nav-tab ${isActive ? 'active' : ''}`}
+          id="nav-link-kernel"
+        >
+          <Cpu size={15} />
+          <span>KERNEL</span>
+        </NavLink>
+        <NavLink
+          to="/memoria"
+          className={({ isActive }) => `hud-nav-tab ${isActive ? 'active' : ''}`}
+          id="nav-link-memoria"
+        >
+          <MemoryStick size={15} />
+          <span>MEMORIA</span>
         </NavLink>
       </nav>
 

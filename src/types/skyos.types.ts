@@ -11,9 +11,40 @@ export interface Process {
   memory_usage_mb: number;
   pid: number;
   last_heartbeat?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, any>;
   created_at?: string;
   updated_at?: string;
+  // Campos del motor del kernel (Paso 2)
+  burst_total: number;
+  burst_remaining: number;
+  waiting_ticks?: number;
+  started_tick?: number | null;
+  finished_tick?: number | null;
+  arrival_tick?: number | null;
+  last_run_tick?: number | null;
+  is_daemon: boolean;
+}
+
+export interface MemoryBlock {
+  id: string;
+  process_id: string;
+  start_mb: number;
+  size_mb: number;
+  created_at?: string;
+}
+
+export type SystemStatus = 'OFF' | 'BOOTING' | 'RUNNING' | 'PANIC';
+export type SchedulerType = 'FCFS' | 'ROUND_ROBIN' | 'PRIORITY';
+
+export interface SystemState {
+  id: number;
+  status: SystemStatus;
+  tick: number;
+  scheduler: SchedulerType;
+  quantum: number;
+  boot_count: number;
+  context_switches: number;
+  updated_at: string;
 }
 
 export type DeviceType = 'CAMERA' | 'MOTION_SENSOR' | 'GPS' | 'BATTERY' | 'MOTORS' | 'COMM_MODULE';
@@ -34,6 +65,7 @@ export type EventSeverity = 'INFO' | 'WARNING' | 'CRITICAL' | 'EMERGENCY';
 
 export interface SystemEvent {
   id: string;
+  created_at: string;
   event_type: string;
   severity: EventSeverity;
   description: string;
@@ -43,7 +75,6 @@ export interface SystemEvent {
   acknowledged: boolean;
   acknowledged_by?: string | null;
   acknowledged_at?: string | null;
-  created_at: string;
 }
 
 export interface SystemResources {
