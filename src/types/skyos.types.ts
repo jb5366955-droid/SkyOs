@@ -84,3 +84,19 @@ export interface SystemResources {
 }
 
 export type OverallSystemStatus = 'NORMAL' | 'ALERTA' | 'CRÍTICO';
+
+export type FaultType = 'BATTERY_CRITICAL' | 'GPS_LOSS' | 'MOTOR_FAILURE';
+export type FaultMode = 'ISOLATED' | 'COMBINED' | 'PROGRESSIVE';
+export type FaultStatus = 'ACTIVE' | 'RECOVERED';
+
+export interface FaultInjection {
+  id: string;
+  fault_types: FaultType[];
+  mode: FaultMode;
+  params: Record<string, any>;
+  status: FaultStatus;
+  injected_tick: number;
+  recovered_tick?: number | null;
+  created_by?: string | null;
+  created_at?: string;
+}

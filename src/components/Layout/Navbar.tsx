@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers, MemoryStick } from 'lucide-react';
+import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers, MemoryStick, Crosshair, AlertTriangle } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const { user, profile, role, signOut, loading } = useAuth();
@@ -134,6 +134,22 @@ export const Navbar: React.FC = () => {
         >
           <MemoryStick size={15} />
           <span>MEMORIA</span>
+        </NavLink>
+        <NavLink
+          to="/gemelo"
+          className={({ isActive }) => `hud-nav-tab ${isActive ? 'active' : ''}`}
+          id="nav-link-gemelo"
+        >
+          <Crosshair size={15} />
+          <span>GEMELO DIGITAL</span>
+        </NavLink>
+        <NavLink
+          to="/fallos"
+          className={({ isActive }) => `hud-nav-tab ${isActive ? 'active' : ''}`}
+          id="nav-link-fallos"
+        >
+          <AlertTriangle size={15} />
+          <span>FALLOS</span>
         </NavLink>
       </nav>
 

@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
-import type { Process, SchedulerType, MemoryBlock } from '../types/skyos.types';
+import type { Process, SchedulerType, MemoryBlock, FaultType, FaultMode } from '../types/skyos.types';
+import { faultEngine } from './faultEngine';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -544,6 +545,15 @@ export class KernelEngine {
     let currentBlocks = (memRes.data || []) as MemoryBlock[];
 
     // =======================================================================
+    // PASO 3: MOTOR DE INYECCIÓN DE FALLOS Y FAILSAFE
+    // =======================================================================
+    // 1. Degradación gradual por tick para inyecciones en modo PROGRESSIVE
+    await faultEngine.stepProgressiveFaults(nextTick);
+
+    // 2. Detección y respuesta a contingencias físicas (leyendo directamente de la BD)
+    await faultEngine.detectAndRespondFailsafes(nextTick, processes, currentBlocks, totalMemoryMb);
+
+    // =======================================================================
     // REGLA 3: EN CADA TICK, ANTES DE PLANIFICAR:
     // =======================================================================
 
@@ -1044,6 +1054,35 @@ export class KernelEngine {
       .eq('id', 1);
 
     this.notifyListeners();
+  }
+
+  // =========================================================================
+  // MÉTODOS PÚBLICOS DE INYECCIÓN Y RECUPERACIÓN DE FALLOS (ADMIN)
+  // =========================================================================
+  public async injectFault(
+    faultTypes: FaultType[],
+    mode: FaultMode,
+    customParams?: Record<string, any>
+  ): Promise<{ success: boolean; id?: string; error?: string }> {
+    const res = await faultEngine.injectFault(faultTypes, mode, customParams);
+    this.notifyListeners();
+    return res;
+  }
+
+  public async recoverFault(
+    injectionId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const res = await faultEngine.recoverFault(injectionId);
+    this.notifyListeners();
+    return res;
+  }
+
+  public async repeatFault(
+    injectionId: string
+  ): Promise<{ success: boolean; id?: string; error?: string }> {
+    const res = await faultEngine.repeatFault(injectionId);
+    this.notifyListeners();
+    return res;
   }
 }
 
