@@ -12,6 +12,7 @@ import {
   Pause,
   Square,
   RotateCw,
+  RotateCcw,
   Trash2,
   FlaskConical,
   Lock,
@@ -252,6 +253,102 @@ export const Processes: React.FC = () => {
     } catch (err: any) {
       console.error('[SkyOS Processes] Error eliminando proceso:', err);
       setErrorMessage('ACCESO DENEGADO: el usuario no tiene permisos suficientes');
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  // ==========================================
+  // REINICIO DE PROCESO (TERMINATED -> READY)
+  // ==========================================
+  const handleRestartProcess = async (proc: Process) => {
+    setProcessingId(proc.id);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    try {
+      // 1. Obtener el tick actual de system_state
+      let currentTick = systemState?.tick ?? 0;
+      try {
+        const { data: stData } = await supabase
+          .from('system_state')
+          .select('tick')
+          .eq('id', 1)
+          .single();
+        if (stData && typeof stData.tick === 'number') {
+          currentTick = stData.tick;
+        }
+      } catch (err) {
+        console.warn('[SkyOS Processes] Error obteniendo tick fresco para reinicio:', err);
+      }
+
+      // Quitar metadata.waiting_reason
+      const updatedMeta = { ...((proc.metadata as Record<string, any>) || {}) };
+      delete updatedMeta.waiting_reason;
+
+      const burstTotal = proc.burst_total ?? 10;
+
+      // 1. Reinicia el MISMO proceso (conserva PID e id):
+      // status = READY, burst_remaining = burst_total, waiting_ticks = 0, started_tick = null,
+      // finished_tick = null, last_run_tick = 0, arrival_tick = tick actual de system_state,
+      // y quita metadata.waiting_reason.
+      const updatePayload: Record<string, any> = {
+        status: 'READY',
+        burst_remaining: burstTotal,
+        waiting_ticks: 0,
+        started_tick: null,
+        finished_tick: null,
+        last_run_tick: 0,
+        arrival_tick: currentTick,
+        cpu_usage_pct: 0,
+        metadata: updatedMeta,
+      };
+
+      // 3. Después del update usa .select() y, si se modificaron 0 filas o hay error,
+      // muestra el aviso rojo "ACCESO DENEGADO".
+      const { data, error } = await supabase
+        .from('processes')
+        .update(updatePayload)
+        .eq('id', proc.id)
+        .select();
+
+      if (error || !data || data.length === 0) {
+        console.warn('[SkyOS RLS] Reinicio denegado o 0 filas afectadas:', {
+          procId: proc.id,
+          error: error?.message,
+          dataLength: data?.length,
+        });
+        setErrorMessage('ACCESO DENEGADO');
+        return;
+      }
+
+      const updatedProc = data[0] as Process;
+
+      // 2. Registra un evento PROCESS_RESTARTED en events (severity INFO)
+      // con telemetry_snapshot JSON {"pid":N,"tick":N,"burst_total":N}.
+      const { error: eventError } = await supabase
+        .from('events')
+        .insert({
+          event_type: 'PROCESS_RESTARTED',
+          severity: 'INFO',
+          description: `Proceso "${updatedProc.name}" (PID #${updatedProc.pid}) reiniciado con éxito: TERMINATED -> READY`,
+          source_process_id: updatedProc.id,
+          telemetry_snapshot: {
+            pid: updatedProc.pid,
+            tick: currentTick,
+            burst_total: updatedProc.burst_total ?? burstTotal,
+          },
+        });
+
+      if (eventError) {
+        console.warn('[SkyOS Events] No se pudo insertar evento PROCESS_RESTARTED:', eventError.message);
+      }
+
+      setSuccessMessage(`Proceso "${updatedProc.name}" (PID #${updatedProc.pid}) reiniciado a estado READY.`);
+      await fetchProcesses();
+    } catch (err: any) {
+      console.error('[SkyOS Processes] Excepción al reiniciar proceso:', err);
+      setErrorMessage('ACCESO DENEGADO');
     } finally {
       setProcessingId(null);
     }
@@ -613,6 +710,15 @@ export const Processes: React.FC = () => {
                     role === 'ADMIN' ||
                     (role === 'USER' && USER_ALLOWED_PROCESS_IDS.includes(proc.id));
 
+                  // Acción "Reiniciar" para procesos en estado TERMINATED y que no sean is_daemon:
+                  // 1. ADMIN puede reiniciar cualquiera
+                  // 2. USER solo patrol_manager, video_recorder y vision_detector
+                  // 3. GUEST no ve el botón
+                  const canRestart =
+                    isTerminated &&
+                    !proc.is_daemon &&
+                    (role === 'ADMIN' || (role === 'USER' && USER_ALLOWED_PROCESS_IDS.includes(proc.id)));
+
                   // Caso especial de prueba: botón de depuración para USER en flight_control
                   const showFlightControlDebug = role === 'USER' && proc.id === 'flight_control' && !isTerminated;
 
@@ -626,14 +732,10 @@ export const Processes: React.FC = () => {
                         backgroundColor: isRunning ? 'rgba(0, 255, 136, 0.02)' : 'transparent',
                       }}
                       onMouseEnter={(e) => {
-                        if (!isTerminated) {
-                          (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(56, 189, 248, 0.06)';
-                        }
+                        (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(56, 189, 248, 0.06)';
                       }}
                       onMouseLeave={(e) => {
-                        if (!isTerminated) {
-                          (e.currentTarget as HTMLElement).style.backgroundColor = isRunning ? 'rgba(0, 255, 136, 0.02)' : 'transparent';
-                        }
+                        (e.currentTarget as HTMLElement).style.backgroundColor = isRunning ? 'rgba(0, 255, 136, 0.02)' : 'transparent';
                       }}
                     >
                       {/* 1. PID */}
@@ -753,17 +855,29 @@ export const Processes: React.FC = () => {
 
                       {/* 8. Acciones por fila (Transiciones válidas) */}
                       <td style={{ padding: '0.75rem', textAlign: 'right' }}>
-                        {/* Requisito 6: Los procesos TERMINATED se ven atenuados y sin acciones */}
+                        {/* Requisito 6 / Excepción Acción Reiniciar: TERMINATED */}
                         {isTerminated ? (
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.5rem' }}>
-                            <span style={{
-                              fontFamily: 'var(--font-mono)',
-                              fontSize: '0.68rem',
-                              color: 'var(--text-dim)',
-                              letterSpacing: '0.04em'
-                            }}>
-                              FINALIZADO // SIN ACCIONES
-                            </span>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            {/* Acción Reiniciar: solo visible si canRestart (ADMIN o USER en sus 3 procesos, y no is_daemon; GUEST no lo ve) */}
+                            {canRestart && (
+                              <button
+                                onClick={() => handleRestartProcess(proc)}
+                                disabled={isBusy}
+                                className="btn-action btn-action-reanudar"
+                                style={{
+                                  borderColor: 'rgba(0, 229, 255, 0.45)',
+                                  color: 'var(--cyan-primary)',
+                                  backgroundColor: 'rgba(0, 229, 255, 0.1)',
+                                  opacity: 1,
+                                }}
+                                title="Reiniciar proceso: TERMINATED -> READY (conserva PID)"
+                                id={`btn-restart-process-${proc.pid}`}
+                              >
+                                <RotateCcw size={12} className={isBusy ? 'pulse-dot' : ''} />
+                                <span>REINICIAR</span>
+                              </button>
+                            )}
+
                             {/* Opcional para ADMIN: botón de purga/eliminación */}
                             {role === 'ADMIN' && (
                               <button
@@ -775,6 +889,45 @@ export const Processes: React.FC = () => {
                                 <Trash2 size={12} />
                                 <span>BORRAR</span>
                               </button>
+                            )}
+
+                            {/* Indicador de estado para roles sin acción de reinicio */}
+                            {!canRestart && role !== 'ADMIN' && (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '0.3rem',
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '0.68rem',
+                                color: 'var(--text-dim)',
+                                letterSpacing: '0.04em'
+                              }}>
+                                {role === 'GUEST' ? (
+                                  <>
+                                    <Lock size={12} />
+                                    <span>FINALIZADO // SOLO LECTURA</span>
+                                  </>
+                                ) : proc.is_daemon ? (
+                                  <span>FINALIZADO // DAEMON</span>
+                                ) : (
+                                  <>
+                                    <Lock size={12} />
+                                    <span>FINALIZADO (SOLO ADMIN)</span>
+                                  </>
+                                )}
+                              </span>
+                            )}
+
+                            {/* Si es ADMIN pero el proceso es daemon */}
+                            {role === 'ADMIN' && proc.is_daemon && (
+                              <span style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '0.68rem',
+                                color: 'var(--text-dim)',
+                                letterSpacing: '0.04em'
+                              }}>
+                                DAEMON
+                              </span>
                             )}
                           </div>
                         ) : role === 'GUEST' ? (

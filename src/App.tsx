@@ -10,6 +10,7 @@ import { Kernel } from './pages/Kernel';
 import { Memory } from './pages/Memory';
 import { DigitalTwin } from './pages/DigitalTwin';
 import { Faults } from './pages/Faults';
+import { Benchmark } from './pages/Benchmark';
 
 export const App: React.FC = () => {
   return (
@@ -29,6 +30,7 @@ export const App: React.FC = () => {
               <Route path="/memoria" element={<Memory />} />
               <Route path="/gemelo" element={<DigitalTwin />} />
               <Route path="/fallos" element={<Faults />} />
+              <Route path="/benchmark" element={<Benchmark />} />
             </Route>
           </Route>
 

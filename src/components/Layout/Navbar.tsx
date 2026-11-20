@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers, MemoryStick, Crosshair, AlertTriangle } from 'lucide-react';
+import { Shield, LogOut, User, Cpu, LayoutDashboard, Layers, MemoryStick, Crosshair, AlertTriangle, Gauge } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const { user, profile, role, signOut, loading } = useAuth();
@@ -150,6 +150,14 @@ export const Navbar: React.FC = () => {
         >
           <AlertTriangle size={15} />
           <span>FALLOS</span>
+        </NavLink>
+        <NavLink
+          to="/benchmark"
+          className={({ isActive }) => `hud-nav-tab ${isActive ? 'active' : ''}`}
+          id="nav-link-benchmark"
+        >
+          <Gauge size={15} />
+          <span>BENCHMARK</span>
         </NavLink>
       </nav>
 

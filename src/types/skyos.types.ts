@@ -100,3 +100,15 @@ export interface FaultInjection {
   created_by?: string | null;
   created_at?: string;
 }
+
+// =====================================================================
+// Centro de Benchmarking (Paso 4)
+// =====================================================================
+export interface BenchmarkRun {
+  id: string;
+  name: string;
+  workload: any[];
+  results: any;
+  created_by?: string | null;
+  created_at: string;
+}
