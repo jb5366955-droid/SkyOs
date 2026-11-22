@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import type { RouteWaypoint, MissionRoute, WaypointAction, Device } from '../types/skyos.types';
+import type { RouteWaypoint, MissionRoute, WaypointAction, Device, FlightModelConfig } from '../types/skyos.types';
 import {
   MapPin,
   Play,
@@ -22,6 +22,8 @@ import {
   Eye,
   Radio,
   Sliders,
+  X,
+  Gauge,
 } from 'lucide-react';
 
 // Coordenadas fijas de la Base (Hangar)
@@ -140,6 +142,19 @@ export const MissionPlanner: React.FC = () => {
   const [kernelStatus, setKernelStatus] = useState<string>('OFF');
   const [batteryPercentage, setBatteryPercentage] = useState<number>(100);
 
+  // Modelo de Vuelo Configurable (system_settings -> flight_model)
+  const [flightModel, setFlightModel] = useState<FlightModelConfig>({
+    battery_per_tick: 0.2,
+    speed_m_per_tick: 10,
+    max_ticks_warning: 300,
+  });
+  const [showEditModelModal, setShowEditModelModal] = useState<boolean>(false);
+  const [editBattery, setEditBattery] = useState<string>('0.2');
+  const [editSpeed, setEditSpeed] = useState<string>('10');
+  const [editMaxTicks, setEditMaxTicks] = useState<string>('300');
+  const [isSavingModel, setIsSavingModel] = useState<boolean>(false);
+  const [editModelError, setEditModelError] = useState<string | null>(null);
+
   // Notificaciones y RLS
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -205,11 +220,56 @@ export const MissionPlanner: React.FC = () => {
     }
   }, []);
 
+  // Carga del modelo de vuelo desde system_settings (key: 'flight_model')
+  const fetchFlightModel = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('system_settings')
+        .select('value')
+        .eq('key', 'flight_model')
+        .maybeSingle();
+
+      if (error) {
+        console.warn('[SkyOS MissionPlanner] Error consultando flight_model:', error.message);
+        return;
+      }
+
+      if (data?.value) {
+        const val = data.value;
+        const bpt = typeof val.battery_per_tick === 'number' ? val.battery_per_tick : parseFloat(val.battery_per_tick) || 0.2;
+        const smpt = typeof val.speed_m_per_tick === 'number' ? val.speed_m_per_tick : parseFloat(val.speed_m_per_tick) || 10;
+        const mtw = typeof val.max_ticks_warning === 'number' ? val.max_ticks_warning : parseInt(val.max_ticks_warning, 10) || 300;
+
+        setFlightModel({
+          battery_per_tick: bpt,
+          speed_m_per_tick: smpt,
+          max_ticks_warning: mtw,
+        });
+        setEditBattery(String(bpt));
+        setEditSpeed(String(smpt));
+        setEditMaxTicks(String(mtw));
+      } else {
+        // Si la fila no existe, usa 0.2, 10 y 300
+        setFlightModel({
+          battery_per_tick: 0.2,
+          speed_m_per_tick: 10,
+          max_ticks_warning: 300,
+        });
+        setEditBattery('0.2');
+        setEditSpeed('10');
+        setEditMaxTicks('300');
+      }
+    } catch (err) {
+      console.warn('[SkyOS MissionPlanner] Excepción en fetchFlightModel:', err);
+    }
+  }, []);
+
   useEffect(() => {
     fetchSavedRoutes();
     fetchSystemTelemetry();
+    fetchFlightModel();
 
-    // Suscripción Realtime en routes
+    // Suscripción Realtime en routes, system_state, devices y system_settings
     const routesChannel = supabase
       .channel('skyos-routes-realtime')
       .on(
@@ -240,12 +300,37 @@ export const MissionPlanner: React.FC = () => {
           }
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'system_settings' },
+        (payload) => {
+          if (payload.new && (payload.new as any).key === 'flight_model') {
+            const val = (payload.new as any).value;
+            if (val) {
+              const bpt = typeof val.battery_per_tick === 'number' ? val.battery_per_tick : parseFloat(val.battery_per_tick) || 0.2;
+              const smpt = typeof val.speed_m_per_tick === 'number' ? val.speed_m_per_tick : parseFloat(val.speed_m_per_tick) || 10;
+              const mtw = typeof val.max_ticks_warning === 'number' ? val.max_ticks_warning : parseInt(val.max_ticks_warning, 10) || 300;
+
+              setFlightModel({
+                battery_per_tick: bpt,
+                speed_m_per_tick: smpt,
+                max_ticks_warning: mtw,
+              });
+              setEditBattery(String(bpt));
+              setEditSpeed(String(smpt));
+              setEditMaxTicks(String(mtw));
+            }
+          } else {
+            fetchFlightModel();
+          }
+        }
+      )
       .subscribe();
 
     return () => {
       supabase.removeChannel(routesChannel);
     };
-  }, [fetchSavedRoutes, fetchSystemTelemetry]);
+  }, [fetchSavedRoutes, fetchSystemTelemetry, fetchFlightModel]);
 
   // Limpieza de mensajes de éxito
   useEffect(() => {
@@ -328,20 +413,41 @@ export const MissionPlanner: React.FC = () => {
     return Number((distUnits * 10).toFixed(1));
   }, [fullRoutePoints, waypoints.length]);
 
-  // Ticks estimados: ceil(distancia / 10) + dwellTicks, min 1
+  // Ticks de vuelo: ceil(distancia / speed_m_per_tick)
+  const flightTicks = useMemo(() => {
+    return Math.ceil(distance_m / Math.max(0.1, flightModel.speed_m_per_tick));
+  }, [distance_m, flightModel.speed_m_per_tick]);
+
+  // Ticks de permanencia en waypoints
   const sumDwellTicks = useMemo(() => {
     return waypoints.reduce((acc, wp) => acc + (wp.dwellTicks || 0), 0);
   }, [waypoints]);
 
+  // Ticks estimados totales: flightTicks + dwellTicks, min 1
   const est_ticks = useMemo(() => {
     if (waypoints.length === 0) return 0;
-    return Math.max(1, Math.ceil(distance_m / 10) + sumDwellTicks);
-  }, [distance_m, sumDwellTicks, waypoints.length]);
+    return Math.max(1, flightTicks + sumDwellTicks);
+  }, [waypoints.length, flightTicks, sumDwellTicks]);
 
-  // Batería estimada: ticks * 0.4%
+  // Consumo base de vuelo = battery_per_tick por tick.
+  // Los demás coeficientes se escalan proporcionalmente respecto al valor anterior de 0.4.
   const est_battery_pct = useMemo(() => {
-    return Number((est_ticks * 0.4).toFixed(1));
-  }, [est_ticks]);
+    const scale = flightModel.battery_per_tick / 0.4;
+    const baseFlight = flightTicks * flightModel.battery_per_tick;
+    const dwellFlight = sumDwellTicks * (0.4 * scale);
+    return Number((baseFlight + dwellFlight).toFixed(1));
+  }, [flightTicks, sumDwellTicks, flightModel.battery_per_tick]);
+
+  // Alcance máximo con la batería actual: N ticks (M m)
+  const maxTicksCurrentBattery = useMemo(() => {
+    return flightModel.battery_per_tick > 0
+      ? Math.floor(batteryPercentage / flightModel.battery_per_tick)
+      : 0;
+  }, [batteryPercentage, flightModel.battery_per_tick]);
+
+  const maxDistanceCurrentBattery = useMemo(() => {
+    return maxTicksCurrentBattery * flightModel.speed_m_per_tick;
+  }, [maxTicksCurrentBattery, flightModel.speed_m_per_tick]);
 
   // Reserva de seguridad de batería (failsafe 15%)
   const availableBatteryRes = Math.max(0, batteryPercentage - 15);
@@ -370,14 +476,14 @@ export const MissionPlanner: React.FC = () => {
     return errs;
   }, [waypoints.length, hasExclusionViolation, crossingSegments.length, hasHeightViolation, isBatteryInsufficient, est_battery_pct, availableBatteryRes, batteryPercentage]);
 
-  // Lista de avisos (Amarillo)
+  // Lista de avisos (Amarillo): usa max_ticks_warning en lugar de 60
   const warnings: string[] = useMemo(() => {
     const warns: string[] = [];
-    if (est_ticks > 60) {
-      warns.push(`Misión de larga duración: el tiempo estimado supera los 60 ticks (${est_ticks} ticks).`);
+    if (est_ticks > flightModel.max_ticks_warning) {
+      warns.push(`Misión de larga duración: el tiempo estimado supera los ${flightModel.max_ticks_warning} ticks (${est_ticks} ticks).`);
     }
     return warns;
-  }, [est_ticks]);
+  }, [est_ticks, flightModel.max_ticks_warning]);
 
   const isValidRoute = blockingErrors.length === 0;
 
@@ -764,6 +870,63 @@ export const MissionPlanner: React.FC = () => {
     }
   };
 
+  // ==========================================
+  // ACTUALIZAR MODELO DE VUELO (SOLO ADMIN, RLS)
+  // ==========================================
+  const handleSaveFlightModel = async () => {
+    if (!isAdmin) {
+      setErrorMessage('ACCESO DENEGADO: solo ADMIN puede modificar el modelo de vuelo.');
+      return;
+    }
+
+    setIsSavingModel(true);
+    setEditModelError(null);
+    try {
+      const bpt = parseFloat(editBattery);
+      const smpt = parseFloat(editSpeed);
+      const mtw = parseInt(editMaxTicks, 10);
+
+      if (isNaN(bpt) || bpt <= 0 || isNaN(smpt) || smpt <= 0 || isNaN(mtw) || mtw <= 0) {
+        setEditModelError('Todos los parámetros deben ser números positivos mayores a 0.');
+        setIsSavingModel(false);
+        return;
+      }
+
+      const payload: FlightModelConfig = {
+        battery_per_tick: bpt,
+        speed_m_per_tick: smpt,
+        max_ticks_warning: mtw,
+      };
+
+      const { error } = await supabase
+        .from('system_settings')
+        .upsert({
+          key: 'flight_model',
+          value: payload,
+          updated_at: new Date().toISOString(),
+        });
+
+      if (error) {
+        // Respeta RLS: si hay error, muestra el mensaje real
+        console.error('[SkyOS MissionPlanner] Error RLS actualizando flight_model:', error);
+        setEditModelError(error.message);
+        setErrorMessage(error.message);
+        return;
+      }
+
+      setFlightModel(payload);
+      setShowEditModelModal(false);
+      setSuccessMessage('Modelo de vuelo actualizado con éxito en system_settings.');
+      await fetchFlightModel();
+    } catch (err: any) {
+      console.error('[SkyOS MissionPlanner] Excepción guardando flight_model:', err);
+      setEditModelError(err.message || 'Error al guardar modelo de vuelo');
+      setErrorMessage(err.message || 'Error al guardar modelo de vuelo');
+    } finally {
+      setIsSavingModel(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -1032,14 +1195,14 @@ export const MissionPlanner: React.FC = () => {
               fontFamily: 'var(--font-display)',
               fontSize: '1.25rem',
               fontWeight: 700,
-              color: est_ticks > 60 ? 'var(--amber-warn)' : '#ffffff',
+              color: est_ticks > flightModel.max_ticks_warning ? 'var(--amber-warn)' : '#ffffff',
               marginTop: '2px',
             }}
           >
             {est_ticks} ticks
           </div>
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.68rem', color: 'var(--text-dim)' }}>
-            Vuelo: {Math.ceil(distance_m / 10)}t + Permanencia: {sumDwellTicks}t
+            Vuelo: {flightTicks}t + Permanencia: {sumDwellTicks}t
           </div>
         </div>
 
@@ -1096,6 +1259,59 @@ export const MissionPlanner: React.FC = () => {
             {cursorCoords ? `${(cursorCoords.x * 10).toFixed(0)}m, ${(cursorCoords.y * 10).toFixed(0)}m` : 'Fuera del mapa'}
           </div>
         </div>
+      </div>
+
+      {/* 3.1. Fila Informativa del Modelo de Vuelo Configurable */}
+      <div
+        className="hud-panel"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+          padding: '0.6rem 1rem',
+          backgroundColor: 'rgba(8, 16, 32, 0.85)',
+          border: '1px solid rgba(56, 189, 248, 0.22)',
+          borderRadius: '2px',
+          fontFamily: 'var(--font-mono)',
+          fontSize: '0.76rem',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap', color: 'var(--text-primary)' }}>
+          <Sliders size={14} style={{ color: 'var(--cyan-primary)' }} />
+          <span>
+            Modelo de vuelo: <strong>{flightModel.battery_per_tick}%</strong> de batería por tick,{' '}
+            <strong>{flightModel.speed_m_per_tick} m</strong> por tick. Alcance máximo con la batería actual:{' '}
+            <strong style={{ color: 'var(--emerald-radar)' }}>{maxTicksCurrentBattery} ticks</strong> (
+            <strong style={{ color: 'var(--cyan-primary)' }}>{maxDistanceCurrentBattery} m</strong>)
+          </span>
+        </div>
+
+        {isAdmin && (
+          <button
+            onClick={() => {
+              setEditBattery(String(flightModel.battery_per_tick));
+              setEditSpeed(String(flightModel.speed_m_per_tick));
+              setEditMaxTicks(String(flightModel.max_ticks_warning));
+              setEditModelError(null);
+              setShowEditModelModal(true);
+            }}
+            className="btn-tactical btn-primary"
+            style={{
+              padding: '0.28rem 0.65rem',
+              fontSize: '0.72rem',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+            }}
+            title="Editar parámetros del modelo de vuelo en system_settings"
+            id="btn-edit-flight-model"
+          >
+            <Sliders size={12} />
+            <span>Editar modelo de vuelo</span>
+          </button>
+        )}
       </div>
 
       {/* 4. Cuerpo Principal: Mapa Táctico SVG + Panel de Control */}
@@ -1984,6 +2200,204 @@ export const MissionPlanner: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {/* 6. Modal para Editar Modelo de Vuelo (Solo ADMIN) */}
+      {showEditModelModal && (
+        <div
+          className="hud-modal-overlay"
+          onClick={() => !isSavingModel && setShowEditModelModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10005,
+            backgroundColor: 'rgba(3, 7, 18, 0.8)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+          }}
+        >
+          <div
+            className="hud-modal-box hud-glass-panel"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '480px',
+              width: '100%',
+              padding: '1.4rem',
+              borderRadius: '4px',
+              border: '1px solid var(--cyan-primary)',
+              boxShadow: '0 0 35px rgba(0, 229, 255, 0.25), 0 20px 40px rgba(0, 0, 0, 0.85)',
+              backgroundColor: 'rgba(8, 14, 28, 0.98)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Sliders size={18} style={{ color: 'var(--cyan-primary)' }} />
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem', margin: 0, color: '#ffffff', letterSpacing: '0.04em' }}>
+                  EDITAR MODELO DE VUELO
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowEditModelModal(false)}
+                disabled={isSavingModel}
+                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '2px' }}
+                title="Cerrar ventana"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.76rem', color: 'var(--text-dim)', margin: '0 0 1rem', fontFamily: 'var(--font-body)', lineHeight: 1.4 }}>
+              Configura los coeficientes cinemáticos y de consumo del dron. Se actualiza en la tabla <code>public.system_settings</code> con la clave <code>flight_model</code>.
+            </p>
+
+            {editModelError && (
+              <div
+                style={{
+                  padding: '0.65rem 0.85rem',
+                  marginBottom: '1rem',
+                  backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid var(--crimson-crit)',
+                  borderRadius: '3px',
+                  color: '#ffffff',
+                  fontSize: '0.78rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                }}
+              >
+                <AlertTriangle size={15} style={{ color: 'var(--crimson-crit)', flexShrink: 0 }} />
+                <span>{editModelError}</span>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                  CONSUMO DE BATERÍA POR TICK (%)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="100"
+                  value={editBattery}
+                  onChange={(e) => setEditBattery(e.target.value)}
+                  disabled={isSavingModel}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '2px',
+                    color: '#ffffff',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '0.88rem',
+                  }}
+                />
+                <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+                  Valor por defecto: 0.2% por tick
+                </span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                  VELOCIDAD DE VUELO (METROS POR TICK)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="1000"
+                  value={editSpeed}
+                  onChange={(e) => setEditSpeed(e.target.value)}
+                  disabled={isSavingModel}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '2px',
+                    color: '#ffffff',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '0.88rem',
+                  }}
+                />
+                <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+                  Valor por defecto: 10 m por tick (10 m = 1 unidad de mapa)
+                </span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                  AVISO DE MISIÓN LARGA (TICKS)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="10000"
+                  value={editMaxTicks}
+                  onChange={(e) => setEditMaxTicks(e.target.value)}
+                  disabled={isSavingModel}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '2px',
+                    color: '#ffffff',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '0.88rem',
+                  }}
+                />
+                <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+                  Valor por defecto: 300 ticks
+                </span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '1.25rem', paddingTop: '0.85rem', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditBattery('0.2');
+                  setEditSpeed('10');
+                  setEditMaxTicks('300');
+                }}
+                disabled={isSavingModel}
+                className="btn-tactical"
+                style={{ fontSize: '0.72rem', padding: '0.35rem 0.65rem' }}
+              >
+                Restablecer (0.2, 10, 300)
+              </button>
+
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowEditModelModal(false)}
+                  disabled={isSavingModel}
+                  className="btn-tactical"
+                  style={{ fontSize: '0.72rem', padding: '0.35rem 0.75rem' }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveFlightModel}
+                  disabled={isSavingModel}
+                  className="btn-tactical btn-primary"
+                  style={{ fontSize: '0.72rem', padding: '0.35rem 0.95rem' }}
+                >
+                  {isSavingModel ? 'Guardando...' : 'Guardar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

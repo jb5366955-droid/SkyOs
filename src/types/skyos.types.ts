@@ -140,3 +140,12 @@ export interface MissionRoute {
   created_at: string;
   updated_at?: string;
 }
+
+// =====================================================================
+// Modelo de Vuelo Configurable (system_settings -> 'flight_model')
+// =====================================================================
+export interface FlightModelConfig {
+  battery_per_tick: number;
+  speed_m_per_tick: number;
+  max_ticks_warning: number;
+}
