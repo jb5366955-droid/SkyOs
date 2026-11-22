@@ -112,3 +112,31 @@ export interface BenchmarkRun {
   created_by?: string | null;
   created_at: string;
 }
+
+// =====================================================================
+// Planificador de Misión y Rutas (Paso 5)
+// =====================================================================
+export type WaypointAction = 'VOLAR' | 'ESTACIONARIO' | 'ESCANEAR' | 'GRABAR';
+
+export interface RouteWaypoint {
+  id: string;
+  x: number; // 0 a 100 unidades (1 u = 10m)
+  y: number; // 0 a 100 unidades (1 u = 10m)
+  altitude: number; // 10 a 120 m
+  action: WaypointAction;
+  dwellTicks: number; // 0 a 10
+}
+
+export interface MissionRoute {
+  id: string;
+  name: string;
+  description?: string | null;
+  waypoints: RouteWaypoint[];
+  distance_m: number;
+  est_ticks: number;
+  est_battery_pct: number;
+  is_active: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at?: string;
+}

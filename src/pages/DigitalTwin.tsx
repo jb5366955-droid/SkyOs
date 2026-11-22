@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { kernelEngine } from '../kernel/engine';
 import type {
@@ -7,6 +8,9 @@ import type {
   Device,
   MemoryBlock,
   SystemResources,
+  MissionRoute,
+  RouteWaypoint,
+  WaypointAction,
 } from '../types/skyos.types';
 import {
   Crosshair,
@@ -18,58 +22,60 @@ import {
   RefreshCw,
   Info,
   Navigation,
+  MapPin,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 
-interface Waypoint {
-  id: string;
-  label: string;
-  sub: string;
-  x: number;
-  y: number;
-  desc: string;
-}
+// =====================================================================
+// CONSTANTES DE NAVEGACIÓN Y CARTOGRAFÍA TÁCTICA (Coordenadas 100x100)
+// =====================================================================
 
-const WAYPOINTS: Waypoint[] = [
-  { id: 'BASE', label: 'BASE ALPHA', sub: 'ESTACIÓN TERRENA', x: 100, y: 350, desc: 'Hangar Central · Punto de Despegue y Retorno' },
-  { id: 'WP-1', label: 'WP-1', sub: 'SECTOR ALFA', x: 180, y: 130, desc: 'Geocerca Norte · Vía de Aproximación Inicial' },
-  { id: 'WP-2', label: 'WP-2', sub: 'SECTOR BRAVO', x: 380, y: 70,  desc: 'Puesto de Observación Bravo · Monitoreo Óptico' },
-  { id: 'WP-3', label: 'WP-3', sub: 'SECTOR CHARLIE', x: 620, y: 140, desc: 'Sector Este · Borde Perimetral de Reconocimiento' },
-  { id: 'WP-4', label: 'WP-4', sub: 'SECTOR DELTA', x: 560, y: 350, desc: 'Sector Sur · Corredor de Aproximación a Base' },
+// Coordenadas fijas de la Base (Hangar)
+const BASE_POINT: RouteWaypoint & { label: string; sub: string } = {
+  id: 'BASE',
+  x: 50,
+  y: 92,
+  altitude: 0,
+  action: 'VOLAR',
+  dwellTicks: 0,
+  label: 'BASE ALPHA',
+  sub: 'HANGAR CENTRAL (H)',
+};
+
+// Zona de Exclusión (No Fly Zone): x en 60..85, y en 20..45
+const EXCLUSION_ZONE = {
+  minX: 60,
+  maxX: 85,
+  minY: 20,
+  maxY: 45,
+  width: 25,
+  height: 25,
+};
+
+// 3 Puntos de Interés con nombre (mismo estilo del planificador de misión)
+const POINTS_OF_INTEREST = [
+  { id: 'poi-1', name: 'Torre Radar Alfa', x: 25, y: 25, type: 'RADAR' },
+  { id: 'poi-2', name: 'Depósito Norte', x: 35, y: 65, type: 'DEPÓSITO' },
+  { id: 'poi-3', name: 'Antena Satelital', x: 80, y: 75, type: 'COMUNICACIONES' },
 ];
 
-function calculatePathPosition(progress: number): { x: number; y: number; angle: number; activeSegment: number } {
-  // Puntos en secuencia cerrada: Base -> WP1 -> WP2 -> WP3 -> WP4 -> Base
-  const pts = [...WAYPOINTS, WAYPOINTS[0]];
-  const segLengths: number[] = [];
-  let totalDist = 0;
+// Ruta circular por defecto (Regla 4: cuando no hay ruta activa en routes)
+const DEFAULT_CIRCULAR_WAYPOINTS: RouteWaypoint[] = [
+  { id: 'wp-circ-1', x: 25, y: 75, altitude: 30, action: 'VOLAR', dwellTicks: 0 },
+  { id: 'wp-circ-2', x: 20, y: 35, altitude: 45, action: 'ESCANEAR', dwellTicks: 3 },
+  { id: 'wp-circ-3', x: 45, y: 18, altitude: 50, action: 'GRABAR', dwellTicks: 2 },
+  { id: 'wp-circ-4', x: 55, y: 65, altitude: 35, action: 'ESTACIONARIO', dwellTicks: 2 },
+];
 
-  for (let i = 0; i < pts.length - 1; i++) {
-    const dx = pts[i + 1].x - pts[i].x;
-    const dy = pts[i + 1].y - pts[i].y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    segLengths.push(len);
-    totalDist += len;
-  }
-
-  const targetDist = Math.max(0, Math.min(1, progress)) * totalDist;
-  let accum = 0;
-
-  for (let i = 0; i < segLengths.length; i++) {
-    const sl = segLengths[i];
-    if (accum + sl >= targetDist || i === segLengths.length - 1) {
-      const remaining = targetDist - accum;
-      const t = sl > 0 ? Math.max(0, Math.min(1, remaining / sl)) : 0;
-      const x = pts[i].x + t * (pts[i + 1].x - pts[i].x);
-      const y = pts[i].y + t * (pts[i + 1].y - pts[i].y);
-      const dx = pts[i + 1].x - pts[i].x;
-      const dy = pts[i + 1].y - pts[i].y;
-      const angle = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
-      return { x, y, angle, activeSegment: i };
-    }
-    accum += sl;
-  }
-
-  return { x: pts[0].x, y: pts[0].y, angle: 0, activeSegment: 0 };
+interface SegmentData {
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+  length: number;
+  fromIndex: number;
+  toIndex: number;
+  fromWp: RouteWaypoint;
+  toWp: RouteWaypoint;
 }
 
 export const DigitalTwin: React.FC = () => {
@@ -83,6 +89,9 @@ export const DigitalTwin: React.FC = () => {
     used_storage_gb: 22.4,
   });
 
+  // Ruta activa de la base de datos (tabla routes)
+  const [activeRoute, setActiveRoute] = useState<MissionRoute | null>(null);
+
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'MAP' | 'DRON' | 'DUAL'>('DUAL');
@@ -92,12 +101,13 @@ export const DigitalTwin: React.FC = () => {
   // ==========================================
   const fetchAllData = useCallback(async () => {
     try {
-      const [stateRes, procRes, devRes, memRes, setRes] = await Promise.all([
+      const [stateRes, procRes, devRes, memRes, setRes, routeRes] = await Promise.all([
         supabase.from('system_state').select('*').eq('id', 1).maybeSingle(),
         supabase.from('processes').select('*').order('pid', { ascending: true }),
         supabase.from('devices').select('*').order('id', { ascending: true }),
         supabase.from('memory_blocks').select('*').order('start_mb', { ascending: true }),
         supabase.from('system_settings').select('value').eq('key', 'resources').maybeSingle(),
+        supabase.from('routes').select('*').eq('is_active', true).order('updated_at', { ascending: false }).limit(1).maybeSingle(),
       ]);
 
       if (stateRes.data) setSystemState(stateRes.data as SystemState);
@@ -105,6 +115,12 @@ export const DigitalTwin: React.FC = () => {
       if (devRes.data) setDevices(devRes.data as Device[]);
       if (memRes.data) setMemoryBlocks(memRes.data as MemoryBlock[]);
       if (setRes.data?.value) setResources(setRes.data.value as SystemResources);
+
+      if (routeRes.data) {
+        setActiveRoute(routeRes.data as MissionRoute);
+      } else {
+        setActiveRoute(null);
+      }
     } catch (err) {
       console.error('[SkyOS Gemelo] Error al cargar telemetría:', err);
     }
@@ -116,7 +132,7 @@ export const DigitalTwin: React.FC = () => {
     setRefreshing(false);
   };
 
-  // Suscripción Realtime (Regla del usuario)
+  // Suscripción Realtime (Regla del usuario: processes, devices, system_state, routes)
   useEffect(() => {
     let isMounted = true;
 
@@ -133,7 +149,7 @@ export const DigitalTwin: React.FC = () => {
       if (isMounted) fetchAllData();
     });
 
-    // Suscripción Realtime a Supabase en processes, devices y system_state
+    // Suscripción Realtime a Supabase en processes, devices, system_state, memory_blocks y routes
     const channel = supabase
       .channel('skyos-gemelo-digital-realtime')
       .on(
@@ -157,6 +173,11 @@ export const DigitalTwin: React.FC = () => {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'memory_blocks' },
+        () => fetchAllData()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'routes' },
         () => fetchAllData()
       )
       .subscribe();
@@ -198,27 +219,164 @@ export const DigitalTwin: React.FC = () => {
   const videoProc = useMemo(() => processes.find((p) => p.id === 'video_recorder'), [processes]);
   const commProc = useMemo(() => processes.find((p) => p.id === 'comm_link'), [processes]);
 
-  // Progreso y posición de patrol_manager (Regla 3)
+  // Progreso y ráfagas de patrol_manager (Regla 2)
   const patrolBurstTotal = patrolProc?.burst_total || 10;
   const patrolBurstRem = patrolProc?.burst_remaining ?? patrolBurstTotal;
   const patrolProgressRaw =
     patrolBurstTotal > 0 ? (patrolBurstTotal - patrolBurstRem) / patrolBurstTotal : 0;
   const patrolProgress = Math.max(0, Math.min(1, patrolProgressRaw));
 
-  // Posición del Dron en la ruta de 4 waypoints:
-  // - patrol_manager RUNNING -> se mueve según progreso
-  // - READY o WAITING -> quieto en su posición actual
-  // - TERMINATED -> vuelve a la base
-  // - system_state = OFF -> en tierra (Base)
+  // ==========================================
+  // DETERMINACIÓN DE LA RUTA Y PUNTOS EN VUELO
+  // ==========================================
+  const hasActiveRoute = useMemo(() => {
+    return !!(activeRoute && Array.isArray(activeRoute.waypoints) && activeRoute.waypoints.length > 0);
+  }, [activeRoute]);
+
+  const effectiveWaypoints = useMemo<RouteWaypoint[]>(() => {
+    if (hasActiveRoute && activeRoute) {
+      return activeRoute.waypoints;
+    }
+    return DEFAULT_CIRCULAR_WAYPOINTS;
+  }, [hasActiveRoute, activeRoute]);
+
+  // Trazado completo: Base -> waypoints -> Base
+  const fullRoutePoints = useMemo<RouteWaypoint[]>(() => {
+    return [BASE_POINT, ...effectiveWaypoints, BASE_POINT];
+  }, [effectiveWaypoints]);
+
+  // Segmentos y cálculo de distancia acumulada
+  const routeSegments = useMemo<SegmentData[]>(() => {
+    const segs: SegmentData[] = [];
+    for (let i = 0; i < fullRoutePoints.length - 1; i++) {
+      const ptA = fullRoutePoints[i];
+      const ptB = fullRoutePoints[i + 1];
+      const dx = ptB.x - ptA.x;
+      const dy = ptB.y - ptA.y;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      segs.push({
+        start: { x: ptA.x, y: ptA.y },
+        end: { x: ptB.x, y: ptB.y },
+        length,
+        fromIndex: i,
+        toIndex: i + 1,
+        fromWp: ptA,
+        toWp: ptB,
+      });
+    }
+    return segs;
+  }, [fullRoutePoints]);
+
+  const totalRouteDistance = useMemo(() => {
+    return routeSegments.reduce((sum, s) => sum + s.length, 0);
+  }, [routeSegments]);
+
+  // =========================================================================
+  // POSICIÓN DEL DRON (Regla 2 e Interpolación Lineal por Distancia Acumulada)
+  // =========================================================================
+  // - system_state.status = OFF: dron en tierra (Base)
+  // - patrol_manager = TERMINATED: vuelve a la base
+  // - patrol_manager = READY o WAITING: queda quieto en su posición actual
+  // - patrol_manager = RUNNING: se desplaza según progreso
   const droneNavState = useMemo(() => {
     if (isOff || patrolProc?.status === 'TERMINATED') {
-      return { x: WAYPOINTS[0].x, y: WAYPOINTS[0].y, angle: 0, activeSegment: 0, isAtBase: true };
+      return {
+        x: BASE_POINT.x,
+        y: BASE_POINT.y,
+        angle: 0,
+        activeSegmentIndex: 0,
+        currentWp: null as RouteWaypoint | null,
+        nextWp: effectiveWaypoints[0] || null,
+        isAtBase: true,
+        activeAction: null as WaypointAction | null,
+      };
     }
-    const res = calculatePathPosition(patrolProgress);
-    return { ...res, isAtBase: false };
-  }, [isOff, patrolProc?.status, patrolProgress]);
 
-  // Helper para verificar si un proceso está en WAITING (Regla 7):
+    if (totalRouteDistance === 0 || routeSegments.length === 0) {
+      return {
+        x: BASE_POINT.x,
+        y: BASE_POINT.y,
+        angle: 0,
+        activeSegmentIndex: 0,
+        currentWp: null,
+        nextWp: effectiveWaypoints[0] || null,
+        isAtBase: true,
+        activeAction: null,
+      };
+    }
+
+    const targetDist = Math.max(0, Math.min(1, patrolProgress)) * totalRouteDistance;
+    let accum = 0;
+
+    for (let i = 0; i < routeSegments.length; i++) {
+      const seg = routeSegments[i];
+      if (accum + seg.length >= targetDist || i === routeSegments.length - 1) {
+        const remaining = targetDist - accum;
+        const t = seg.length > 0 ? Math.max(0, Math.min(1, remaining / seg.length)) : 0;
+        const x = seg.start.x + t * (seg.end.x - seg.start.x);
+        const y = seg.start.y + t * (seg.end.y - seg.start.y);
+        const dx = seg.end.x - seg.start.x;
+        const dy = seg.end.y - seg.start.y;
+        const angle = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+
+        const targetWp = seg.toWp.id !== 'BASE' ? seg.toWp : null;
+        const nextSeg = routeSegments[i + 1];
+        const nextWp = nextSeg ? (nextSeg.toWp.id !== 'BASE' ? nextSeg.toWp : null) : null;
+
+        // Determinar si el dron está en/cerca de un waypoint (distancia <= 5.5 unidades)
+        let activeAction: WaypointAction | null = null;
+        const nearWp = effectiveWaypoints.find((wp) => {
+          const dX = wp.x - x;
+          const dY = wp.y - y;
+          return Math.sqrt(dX * dX + dY * dY) <= 5.5;
+        });
+
+        if (nearWp) {
+          activeAction = nearWp.action;
+        } else if (targetWp && t > 0.65) {
+          activeAction = targetWp.action;
+        }
+
+        return {
+          x,
+          y,
+          angle,
+          activeSegmentIndex: i,
+          currentWp: targetWp,
+          nextWp,
+          isAtBase: false,
+          activeAction,
+        };
+      }
+      accum += seg.length;
+    }
+
+    return {
+      x: BASE_POINT.x,
+      y: BASE_POINT.y,
+      angle: 0,
+      activeSegmentIndex: 0,
+      currentWp: null,
+      nextWp: effectiveWaypoints[0] || null,
+      isAtBase: true,
+      activeAction: null,
+    };
+  }, [isOff, patrolProc?.status, totalRouteDistance, routeSegments, patrolProgress, effectiveWaypoints]);
+
+  // =========================================================================
+  // ACCIONES EN WAYPOINTS (Regla 3)
+  // - ESCANEAR -> cono de escaneo
+  // - GRABAR -> indicador REC parpadeando
+  // - ESTACIONARIO -> pausa visible (aura + badge HOVER)
+  // =========================================================================
+  const isVisionRunning = visionProc?.status === 'RUNNING';
+  const isVideoRunning = videoProc?.status === 'RUNNING';
+
+  const isScanActive = !isOff && (isVisionRunning || droneNavState.activeAction === 'ESCANEAR');
+  const isRecordActive = !isOff && (isVideoRunning || droneNavState.activeAction === 'GRABAR');
+  const isHoverActive = !isOff && droneNavState.activeAction === 'ESTACIONARIO';
+
+  // Helper para verificar procesos en WAITING (Regla 7):
   // ámbar con "BLOQUEADO", o "SIN MEMORIA" si metadata.waiting_reason = 'MEMORY'
   const getWaitingStatus = (proc?: Process) => {
     if (!proc || proc.status !== 'WAITING') return null;
@@ -274,6 +432,55 @@ export const DigitalTwin: React.FC = () => {
   const processInCpu = useMemo(() => {
     return processes.find((p) => p.status === 'RUNNING');
   }, [processes]);
+
+  // =========================================================================
+  // TELEMETRÍA DE NAVEGACIÓN PARA EL PANEL (Regla 3: Waypoint actual, Siguiente, Ticks restantes)
+  // =========================================================================
+  const navTelemetry = useMemo(() => {
+    const ticksRestantes = patrolProc ? patrolBurstRem : 0;
+
+    let waypointActualDesc = '';
+    let waypointSiguienteDesc = '';
+
+    if (isOff) {
+      waypointActualDesc = 'BASE ALPHA (50, 92) · Dron en tierra';
+      waypointSiguienteDesc = effectiveWaypoints.length > 0
+        ? `WP-1 (${effectiveWaypoints[0].x}, ${effectiveWaypoints[0].y}) · ${effectiveWaypoints[0].action}`
+        : 'Sin waypoints';
+    } else if (patrolProc?.status === 'TERMINATED') {
+      waypointActualDesc = 'BASE ALPHA (50, 92) · Misión completada';
+      waypointSiguienteDesc = 'MISIÓN FINALIZADA (RTH)';
+    } else if (droneNavState.isAtBase || patrolProgress === 0) {
+      waypointActualDesc = 'BASE ALPHA (50, 92) · Despegue';
+      waypointSiguienteDesc = effectiveWaypoints.length > 0
+        ? `WP-1 (${effectiveWaypoints[0].x}, ${effectiveWaypoints[0].y}) · ${effectiveWaypoints[0].action}`
+        : 'Sin waypoints';
+    } else {
+      // En ruta
+      const currentIdx = droneNavState.currentWp
+        ? effectiveWaypoints.findIndex((w) => w.id === droneNavState.currentWp?.id)
+        : -1;
+
+      if (droneNavState.currentWp && currentIdx >= 0) {
+        waypointActualDesc = `WP-${currentIdx + 1} (${droneNavState.currentWp.x}, ${droneNavState.currentWp.y}) · ${droneNavState.currentWp.action} (${droneNavState.currentWp.altitude}m)`;
+      } else {
+        waypointActualDesc = 'BASE ALPHA (50, 92) · Retorno a Base';
+      }
+
+      if (droneNavState.nextWp) {
+        const nextIdx = effectiveWaypoints.findIndex((w) => w.id === droneNavState.nextWp?.id);
+        waypointSiguienteDesc = `WP-${nextIdx + 1} (${droneNavState.nextWp.x}, ${droneNavState.nextWp.y}) · ${droneNavState.nextWp.action} (${droneNavState.nextWp.altitude}m)`;
+      } else {
+        waypointSiguienteDesc = 'BASE ALPHA (50, 92) · Aproximación Final (H)';
+      }
+    }
+
+    return {
+      waypointActual: waypointActualDesc,
+      waypointSiguiente: waypointSiguienteDesc,
+      ticksRestantes,
+    };
+  }, [isOff, patrolProc, patrolBurstRem, droneNavState, effectiveWaypoints, patrolProgress]);
 
   return (
     <div
@@ -368,7 +575,7 @@ export const DigitalTwin: React.FC = () => {
                 letterSpacing: '0.04em',
               }}
             >
-              SIMULADOR FÍSICO Y VECTORIAL SINCRONIZADO EN TIEMPO REAL CON EL KERNEL DE SKYOS
+              SIMULADOR FÍSICO VECTORIAL · CARTOGRAFÍA TÁCTICA SINCRONIZADA CON SUPABASE REALTIME
             </div>
           </div>
         </div>
@@ -414,7 +621,7 @@ export const DigitalTwin: React.FC = () => {
                 fontWeight: 600,
               }}
             >
-              MAPA 4 WAYPOINTS
+              MAPA DE MISIÓN
             </button>
             <button
               onClick={() => setActiveTab('DRON')}
@@ -448,6 +655,104 @@ export const DigitalTwin: React.FC = () => {
       </div>
 
       {/* =====================================================================
+          BANNER DE ESTADO DE LA MISIÓN (Regla 4: Alerta si no hay ruta activa)
+          ===================================================================== */}
+      {!hasActiveRoute ? (
+        <div
+          style={{
+            padding: '0.75rem 1rem',
+            backgroundColor: 'rgba(234, 179, 8, 0.12)',
+            border: '1px solid var(--amber-warn)',
+            borderRadius: '2px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+            <AlertTriangle size={18} color="var(--amber-warn)" />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.82rem', color: '#fef08a' }}>
+              Sin misión activa: planea una en{' '}
+              <Link
+                to="/ruta"
+                style={{
+                  color: 'var(--cyan-primary)',
+                  textDecoration: 'underline',
+                  fontWeight: 700,
+                }}
+              >
+                /ruta
+              </Link>
+            </span>
+          </div>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.68rem',
+              color: '#fef08a',
+              backgroundColor: 'rgba(245, 158, 11, 0.2)',
+              padding: '0.2rem 0.5rem',
+              borderRadius: '2px',
+              border: '1px solid rgba(245, 158, 11, 0.4)',
+            }}
+          >
+            PATRULLA CIRCULAR POR DEFECTO
+          </span>
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: '0.65rem 1rem',
+            backgroundColor: 'rgba(0, 255, 136, 0.08)',
+            border: '1px solid rgba(0, 255, 136, 0.35)',
+            borderRadius: '2px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.75rem',
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+            <span
+              className="pulse-dot"
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: 'var(--emerald-radar)',
+              }}
+            />
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: '#ffffff' }}>
+              MISIÓN ACTIVA:{' '}
+              <strong style={{ color: 'var(--cyan-primary)' }}>{activeRoute?.name}</strong>{' '}
+              <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>
+                ({activeRoute?.waypoints.length} waypoints · {activeRoute?.distance_m} m · {activeRoute?.est_ticks}t est.)
+              </span>
+            </div>
+          </div>
+          <Link
+            to="/ruta"
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.72rem',
+              color: 'var(--cyan-primary)',
+              textDecoration: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.3rem',
+              fontWeight: 600,
+            }}
+          >
+            <span>EDITAR EN /RUTA</span>
+            <ExternalLink size={12} />
+          </Link>
+        </div>
+      )}
+
+      {/* =====================================================================
           LAYOUT PRINCIPAL: ÁREA VISUAL SVG (IZQ) + PANEL LATERAL (DER)
           ===================================================================== */}
       <div
@@ -462,7 +767,7 @@ export const DigitalTwin: React.FC = () => {
             COLUMNA IZQUIERDA: VISUALIZACIONES SVG DEL DRON Y NAVEGACIÓN
             =================================================================== */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-          {/* 1. MAPA TÁCTICO DE NAVEGACIÓN (4 WAYPOINTS) */}
+          {/* 1. MAPA TÁCTICO DE NAVEGACIÓN (RUTA ACTIVA O CIRCULAR POR DEFECTO) */}
           {(activeTab === 'MAP' || activeTab === 'DUAL') && (
             <div
               className="hud-panel"
@@ -495,7 +800,7 @@ export const DigitalTwin: React.FC = () => {
                         letterSpacing: '0.06em',
                       }}
                     >
-                      RUTA DE NAVEGACIÓN · 4 WAYPOINTS (PATROL MANAGER)
+                      MAPA TÁCTICO DE NAVEGACIÓN · {hasActiveRoute ? activeRoute?.name.toUpperCase() : 'PATRULLA CIRCULAR (DEFECTO)'}
                     </h3>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.66rem', color: 'var(--text-dim)' }}>
                       PROGRESS = ({patrolBurstTotal} - {patrolBurstRem}) / {patrolBurstTotal} = {(patrolProgress * 100).toFixed(0)}% · ESTADO:{' '}
@@ -542,132 +847,254 @@ export const DigitalTwin: React.FC = () => {
                 </div>
               </div>
 
-              {/* Contenedor SVG del Mapa */}
+              {/* Contenedor SVG del Mapa Táctico 100x100 (Estilo idéntico a /ruta) */}
               <div
                 style={{
                   position: 'relative',
                   width: '100%',
-                  aspectRatio: '700 / 420',
-                  backgroundColor: '#030712',
+                  aspectRatio: '1 / 1',
+                  maxHeight: '580px',
+                  backgroundColor: '#050a14',
                   borderRadius: '2px',
                   border: '1px solid rgba(56, 189, 248, 0.25)',
                   overflow: 'hidden',
                   boxShadow: 'inset 0 0 40px rgba(0, 0, 0, 0.8)',
+                  userSelect: 'none',
                 }}
               >
                 <svg
-                  viewBox="0 0 700 420"
+                  viewBox="0 0 100 100"
                   style={{ width: '100%', height: '100%', display: 'block' }}
                 >
                   <defs>
-                    {/* Grid Pattern */}
-                    <pattern id="tacticalGrid" width="35" height="35" patternUnits="userSpaceOnUse">
-                      <path d="M 35 0 L 0 0 0 35" fill="none" stroke="rgba(56, 189, 248, 0.08)" strokeWidth="1" />
-                      <circle cx="0" cy="0" r="1.5" fill="rgba(0, 229, 255, 0.2)" />
+                    {/* Rejilla Táctica 10x10 */}
+                    <pattern id="twinGridPattern" width="10" height="10" patternUnits="userSpaceOnUse">
+                      <path d="M 10 0 L 0 0 0 10" fill="none" stroke="rgba(56, 189, 248, 0.08)" strokeWidth="0.3" />
                     </pattern>
 
-                    {/* Gradient Cono de Escaneo */}
-                    <radialGradient id="scanConeGradient" cx="50%" cy="0%" r="90%">
-                      <stop offset="0%" stopColor="rgba(0, 255, 136, 0.55)" />
-                      <stop offset="45%" stopColor="rgba(0, 229, 255, 0.25)" />
+                    {/* Patrón Zona de Exclusión (Rayado rojo 45 deg) */}
+                    <pattern id="twinExclusionHatch" width="4" height="4" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">
+                      <line x1="0" y1="0" x2="0" y2="4" stroke="rgba(255, 51, 102, 0.45)" strokeWidth="1" />
+                    </pattern>
+
+                    {/* Marcador de flechas de ruta */}
+                    <marker
+                      id="twinRouteArrow"
+                      viewBox="0 0 10 10"
+                      refX="6"
+                      refY="5"
+                      markerWidth="3.2"
+                      markerHeight="3.2"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cyan-primary)" />
+                    </marker>
+
+                    {/* Gradiente Cono de Escaneo */}
+                    <radialGradient id="twinScanCone" cx="50%" cy="0%" r="90%">
+                      <stop offset="0%" stopColor="rgba(0, 255, 136, 0.65)" />
+                      <stop offset="45%" stopColor="rgba(0, 229, 255, 0.3)" />
                       <stop offset="100%" stopColor="rgba(0, 229, 255, 0)" />
                     </radialGradient>
 
-                    {/* Gradient Waypoint Ring */}
-                    <radialGradient id="wpGlow" cx="50%" cy="50%" r="50%">
-                      <stop offset="0%" stopColor="rgba(0, 229, 255, 0.4)" />
-                      <stop offset="100%" stopColor="rgba(0, 229, 255, 0)" />
+                    {/* Gradiente Aura Hover / Estacionario */}
+                    <radialGradient id="twinHoverAura" cx="50%" cy="50%" r="50%">
+                      <stop offset="0%" stopColor="rgba(245, 158, 11, 0.5)" />
+                      <stop offset="100%" stopColor="rgba(245, 158, 11, 0)" />
                     </radialGradient>
                   </defs>
 
                   {/* 1. Fondo de Cuadrícula */}
-                  <rect width="700" height="420" fill="url(#tacticalGrid)" />
+                  <rect width="100" height="100" fill="#040914" />
+                  <rect width="100" height="100" fill="url(#twinGridPattern)" />
 
                   {/* 2. Círculos de Radar Táctico */}
-                  <circle cx="350" cy="210" r="120" fill="none" stroke="rgba(0, 229, 255, 0.06)" strokeWidth="1" strokeDasharray="3 5" />
-                  <circle cx="350" cy="210" r="220" fill="none" stroke="rgba(0, 229, 255, 0.05)" strokeWidth="1" />
+                  <circle cx="50" cy="50" r="28" fill="none" stroke="rgba(0, 229, 255, 0.06)" strokeWidth="0.3" strokeDasharray="1.5 2" />
+                  <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(0, 229, 255, 0.05)" strokeWidth="0.3" />
 
-                  {/* 3. Ruta de Navegación: Base -> WP1 -> WP2 -> WP3 -> WP4 -> Base */}
-                  <polyline
-                    points={`${WAYPOINTS[0].x},${WAYPOINTS[0].y} ${WAYPOINTS[1].x},${WAYPOINTS[1].y} ${WAYPOINTS[2].x},${WAYPOINTS[2].y} ${WAYPOINTS[3].x},${WAYPOINTS[3].y} ${WAYPOINTS[4].x},${WAYPOINTS[4].y} ${WAYPOINTS[0].x},${WAYPOINTS[0].y}`}
-                    fill="none"
-                    stroke="rgba(56, 189, 248, 0.35)"
-                    strokeWidth="2.5"
-                    strokeDasharray="6 6"
-                  />
+                  {/* 3. Curvas de Nivel Decorativas (Contour lines tácticas) */}
+                  <g opacity="0.18">
+                    <path
+                      d="M 5,20 C 20,10 40,25 60,15 C 80,5 95,20 95,40 C 95,60 80,75 55,65 C 30,55 10,70 5,85"
+                      fill="none"
+                      stroke="rgba(56, 189, 248, 0.35)"
+                      strokeWidth="0.4"
+                      strokeDasharray="1.5,1"
+                    />
+                    <path
+                      d="M 10,35 C 25,25 45,35 65,28 C 85,20 90,45 85,60 C 80,75 60,70 45,60 C 25,50 15,60 10,70"
+                      fill="none"
+                      stroke="rgba(56, 189, 248, 0.45)"
+                      strokeWidth="0.4"
+                    />
+                    <path
+                      d="M 20,45 C 30,38 42,42 55,38 C 70,32 78,50 70,62 C 60,70 45,55 35,50 C 25,48 20,52 20,45"
+                      fill="none"
+                      stroke="rgba(56, 189, 248, 0.3)"
+                      strokeWidth="0.4"
+                      strokeDasharray="2,1.5"
+                    />
+                  </g>
 
-                  {/* 4. Dibujo de Waypoints */}
-                  {WAYPOINTS.map((wp, idx) => {
-                    const isBase = wp.id === 'BASE';
-                    const isCurrentTarget = droneNavState.activeSegment === idx && patrolProc?.status === 'RUNNING';
+                  {/* 4. ZONA DE EXCLUSIÓN (Rectangular Roja en 60..85, 20..45) */}
+                  <g id="exclusion-zone">
+                    <rect
+                      x={EXCLUSION_ZONE.minX}
+                      y={EXCLUSION_ZONE.minY}
+                      width={EXCLUSION_ZONE.width}
+                      height={EXCLUSION_ZONE.height}
+                      fill="url(#twinExclusionHatch)"
+                      stroke="var(--crimson-crit)"
+                      strokeWidth="0.8"
+                    />
+                    <rect
+                      x={EXCLUSION_ZONE.minX}
+                      y={EXCLUSION_ZONE.minY}
+                      width={EXCLUSION_ZONE.width}
+                      height={EXCLUSION_ZONE.height}
+                      fill="rgba(255, 51, 102, 0.15)"
+                    />
+                    <text
+                      x={EXCLUSION_ZONE.minX + EXCLUSION_ZONE.width / 2}
+                      y={EXCLUSION_ZONE.minY + 9}
+                      fill="#ff3366"
+                      fontFamily="var(--font-mono)"
+                      fontSize="2.6"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                      letterSpacing="0.05em"
+                    >
+                      ZONA DE EXCLUSIÓN
+                    </text>
+                    <text
+                      x={EXCLUSION_ZONE.minX + EXCLUSION_ZONE.width / 2}
+                      y={EXCLUSION_ZONE.minY + 15}
+                      fill="rgba(255, 255, 255, 0.85)"
+                      fontFamily="var(--font-mono)"
+                      fontSize="2.0"
+                      textAnchor="middle"
+                    >
+                      NO FLY ZONE [60-85, 20-45]
+                    </text>
+                  </g>
+
+                  {/* 5. 3 Puntos de Interés con nombre */}
+                  {POINTS_OF_INTEREST.map((poi) => (
+                    <g key={poi.id} transform={`translate(${poi.x}, ${poi.y})`}>
+                      <circle r="2.6" fill="rgba(56, 189, 248, 0.15)" stroke="rgba(56, 189, 248, 0.6)" strokeWidth="0.4" />
+                      <circle r="0.9" fill="var(--cyan-primary)" />
+                      <text
+                        x="0"
+                        y="-3.6"
+                        fill="#38bdf8"
+                        fontFamily="var(--font-mono)"
+                        fontSize="2.2"
+                        fontWeight="bold"
+                        textAnchor="middle"
+                      >
+                        {poi.name}
+                      </text>
+                    </g>
+                  ))}
+
+                  {/* 6. BASE ALPHA en (50, 92) con una "H" */}
+                  <g id="base-helipad" transform={`translate(${BASE_POINT.x}, ${BASE_POINT.y})`}>
+                    <circle r="4.8" fill="rgba(0, 255, 136, 0.12)" stroke="var(--emerald-radar)" strokeWidth="0.8" />
+                    <circle r="3.4" fill="none" stroke="rgba(0, 255, 136, 0.4)" strokeWidth="0.4" strokeDasharray="1,1" />
+                    <text
+                      x="0"
+                      y="1.7"
+                      fill="var(--emerald-radar)"
+                      fontFamily="var(--font-mono)"
+                      fontSize="4.5"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                    >
+                      H
+                    </text>
+                    <text
+                      x="0"
+                      y="7.0"
+                      fill="#ffffff"
+                      fontFamily="var(--font-mono)"
+                      fontSize="2.2"
+                      fontWeight="bold"
+                      textAnchor="middle"
+                    >
+                      BASE (50,92)
+                    </text>
+                  </g>
+
+                  {/* 7. Segmentos de Ruta con Flechas: Base -> WP1 -> ... -> Base */}
+                  {routeSegments.map((seg, idx) => (
+                    <line
+                      key={`seg-${idx}`}
+                      x1={seg.start.x}
+                      y1={seg.start.y}
+                      x2={seg.end.x}
+                      y2={seg.end.y}
+                      stroke="var(--cyan-primary)"
+                      strokeWidth="0.75"
+                      strokeDasharray="2.5 1.5"
+                      markerEnd="url(#twinRouteArrow)"
+                      opacity="0.85"
+                    />
+                  ))}
+
+                  {/* 8. Waypoints de la ruta activa numerados */}
+                  {effectiveWaypoints.map((wp, index) => {
+                    const isTargetWp = droneNavState.currentWp?.id === wp.id && patrolProc?.status === 'RUNNING';
 
                     return (
-                      <g key={wp.id}>
-                        {/* Halo iluminado */}
-                        <circle cx={wp.x} cy={wp.y} r={isBase ? 24 : 18} fill="url(#wpGlow)" />
-                        <circle
-                          cx={wp.x}
-                          cy={wp.y}
-                          r={isBase ? 16 : 10}
-                          fill={isBase ? 'rgba(0, 229, 255, 0.15)' : 'rgba(15, 23, 42, 0.9)'}
-                          stroke={isCurrentTarget ? 'var(--emerald-radar)' : isBase ? 'var(--cyan-primary)' : 'rgba(56, 189, 248, 0.6)'}
-                          strokeWidth={isCurrentTarget ? 2.5 : 1.5}
-                        />
-
-                        {isBase ? (
-                          <text
-                            x={wp.x}
-                            y={wp.y + 4}
-                            textAnchor="middle"
-                            fill="var(--cyan-primary)"
-                            fontFamily="var(--font-mono)"
-                            fontSize="10"
-                            fontWeight="bold"
-                          >
-                            H
-                          </text>
-                        ) : (
-                          <text
-                            x={wp.x}
-                            y={wp.y + 3.5}
-                            textAnchor="middle"
-                            fill="#ffffff"
-                            fontFamily="var(--font-mono)"
-                            fontSize="8"
-                            fontWeight="bold"
-                          >
-                            {idx}
-                          </text>
+                      <g key={wp.id} transform={`translate(${wp.x}, ${wp.y})`}>
+                        {/* Halo pulsante si es el waypoint objetivo */}
+                        {isTargetWp && (
+                          <circle
+                            r="5.2"
+                            fill="none"
+                            stroke="var(--emerald-radar)"
+                            strokeWidth="0.7"
+                            strokeDasharray="1.5 1"
+                            className="pulse-dot"
+                          />
                         )}
 
-                        {/* Etiqueta de texto de Waypoint */}
+                        <circle
+                          r="3.4"
+                          fill={isTargetWp ? 'rgba(0, 255, 136, 0.25)' : 'rgba(7, 12, 22, 0.95)'}
+                          stroke={isTargetWp ? 'var(--emerald-radar)' : 'var(--cyan-primary)'}
+                          strokeWidth="0.7"
+                        />
+
+                        {/* Número del waypoint */}
                         <text
-                          x={wp.x}
-                          y={wp.y + 22}
-                          textAnchor="middle"
-                          fill={isCurrentTarget ? 'var(--emerald-radar)' : '#94a3b8'}
+                          x="0"
+                          y="1.2"
+                          fill="#ffffff"
                           fontFamily="var(--font-mono)"
-                          fontSize="9"
-                          fontWeight={600}
-                          letterSpacing="0.05em"
+                          fontSize="2.7"
+                          fontWeight="bold"
+                          textAnchor="middle"
                         >
-                          {wp.label}
+                          {index + 1}
                         </text>
+
+                        {/* Altitud y Acción */}
                         <text
-                          x={wp.x}
-                          y={wp.y + 32}
-                          textAnchor="middle"
-                          fill="var(--text-dim)"
+                          x="0"
+                          y="-4.5"
+                          fill={isTargetWp ? 'var(--emerald-radar)' : 'rgba(255, 255, 255, 0.8)'}
                           fontFamily="var(--font-mono)"
-                          fontSize="7"
+                          fontSize="2.1"
+                          textAnchor="middle"
                         >
-                          ({wp.x}, {wp.y})
+                          {wp.altitude}m · {wp.action}
                         </text>
                       </g>
                     );
                   })}
 
-                  {/* 5. El Dron Navegando sobre el Mapa */}
+                  {/* 9. El Dron Navegando sobre el Mapa (100x100) */}
                   <g
                     transform={`translate(${droneNavState.x}, ${droneNavState.y}) rotate(${droneNavState.angle})`}
                     style={{
@@ -675,44 +1102,51 @@ export const DigitalTwin: React.FC = () => {
                       filter: isOff ? 'grayscale(100%) opacity(0.65)' : 'none',
                     }}
                   >
-                    {/* Cono de Escaneo Óptico (Regla 4: vision_detector RUNNING) */}
-                    {visionProc?.status === 'RUNNING' && !isOff && (
+                    {/* Pausa visible: Aura y anillo si acción = ESTACIONARIO (Regla 3) */}
+                    {isHoverActive && (
+                      <g>
+                        <circle r="7.5" fill="url(#twinHoverAura)" stroke="#f59e0b" strokeWidth="0.6" strokeDasharray="1.5 1" className="pulse-dot" />
+                      </g>
+                    )}
+
+                    {/* Cono de Escaneo Óptico (Regla 3 y 4: ESCANEAR o vision_detector RUNNING) */}
+                    {isScanActive && (
                       <g>
                         <polygon
-                          points="0,-16 -75,-120 75,-120"
-                          fill="url(#scanConeGradient)"
-                          stroke="rgba(0, 255, 136, 0.45)"
-                          strokeWidth="1"
+                          points="0,-2.6 -13,-20 13,-20"
+                          fill="url(#twinScanCone)"
+                          stroke="rgba(0, 255, 136, 0.55)"
+                          strokeWidth="0.3"
                         />
-                        <line x1="0" y1="-16" x2="0" y2="-120" stroke="rgba(0, 255, 136, 0.6)" strokeWidth="1" strokeDasharray="3 3" />
-                        <path d="M -60 -100 A 100 100 0 0 1 60 -100" fill="none" stroke="rgba(0, 255, 136, 0.8)" strokeWidth="1.5" />
+                        <line x1="0" y1="-2.6" x2="0" y2="-20" stroke="rgba(0, 255, 136, 0.65)" strokeWidth="0.3" strokeDasharray="1 1" />
+                        <path d="M -10 -16 A 16 16 0 0 1 10 -16" fill="none" stroke="rgba(0, 255, 136, 0.85)" strokeWidth="0.5" />
                       </g>
                     )}
 
                     {/* Ondas RF de la Antena (Regla 6: comm_link RUNNING) */}
                     {commProc?.status === 'RUNNING' && !isOff && (
                       <g>
-                        <circle cx="0" cy="18" r="10" fill="none" stroke="rgba(0, 229, 255, 0.7)" strokeWidth="1" opacity="0.8" />
-                        <circle cx="0" cy="18" r="18" fill="none" stroke="rgba(0, 229, 255, 0.4)" strokeWidth="1" opacity="0.6" />
-                        <circle cx="0" cy="18" r="26" fill="none" stroke="rgba(0, 229, 255, 0.2)" strokeWidth="1" opacity="0.4" />
+                        <circle cx="0" cy="3.5" r="1.8" fill="none" stroke="rgba(0, 229, 255, 0.8)" strokeWidth="0.3" opacity="0.8" />
+                        <circle cx="0" cy="3.5" r="3.2" fill="none" stroke="rgba(0, 229, 255, 0.5)" strokeWidth="0.3" opacity="0.6" />
+                        <circle cx="0" cy="3.5" r="4.6" fill="none" stroke="rgba(0, 229, 255, 0.3)" strokeWidth="0.25" opacity="0.4" />
                       </g>
                     )}
 
                     {/* Brazos del Dron en X */}
-                    <line x1="-22" y1="-22" x2="22" y2="22" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-                    <line x1="-22" y1="22" x2="22" y2="-22" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
+                    <line x1="-3.2" y1="-3.2" x2="3.2" y2="3.2" stroke="#334155" strokeWidth="0.8" strokeLinecap="round" />
+                    <line x1="-3.2" y1="3.2" x2="3.2" y2="-3.2" stroke="#334155" strokeWidth="0.8" strokeLinecap="round" />
 
                     {/* Chasis Central */}
-                    <rect x="-14" y="-18" width="28" height="36" rx="4" fill="#0f172a" stroke="#38bdf8" strokeWidth="1.5" />
+                    <rect x="-2" y="-2.6" width="4" height="5.2" rx="0.6" fill="#0f172a" stroke="#38bdf8" strokeWidth="0.3" />
 
                     {/* Cámara Frontal */}
                     <circle
                       cx="0"
-                      cy="-18"
-                      r="4.5"
+                      cy="-2.6"
+                      r="0.8"
                       fill={getDeviceStyle(cameraDev).color}
                       stroke="#ffffff"
-                      strokeWidth="1"
+                      strokeWidth="0.2"
                       className={getDeviceStyle(cameraDev).isFault ? 'fault-flash' : ''}
                     />
 
@@ -720,25 +1154,25 @@ export const DigitalTwin: React.FC = () => {
                     <circle
                       cx="0"
                       cy="0"
-                      r="3"
+                      r="0.5"
                       fill={isOff ? '#475569' : isSystemRunning ? 'var(--emerald-radar)' : '#f59e0b'}
                     />
 
                     {/* 4 Motores y Hélices */}
                     {[
-                      { x: -22, y: -22, id: 'FL' },
-                      { x: 22, y: -22, id: 'FR' },
-                      { x: -22, y: 22, id: 'RL' },
-                      { x: 22, y: 22, id: 'RR' },
+                      { x: -3.2, y: -3.2, id: 'FL' },
+                      { x: 3.2, y: -3.2, id: 'FR' },
+                      { x: -3.2, y: 3.2, id: 'RL' },
+                      { x: 3.2, y: 3.2, id: 'RR' },
                     ].map((m) => (
                       <g key={m.id} transform={`translate(${m.x}, ${m.y})`}>
                         <circle
                           cx="0"
                           cy="0"
-                          r="5"
+                          r="0.9"
                           fill="#1e293b"
                           stroke={getDeviceStyle(motorDev).color}
-                          strokeWidth="1.5"
+                          strokeWidth="0.25"
                           className={getDeviceStyle(motorDev).isFault ? 'fault-flash' : ''}
                         />
                         {/* Hélice rotatoria */}
@@ -751,27 +1185,37 @@ export const DigitalTwin: React.FC = () => {
                             transformOrigin: '0px 0px',
                           }}
                         >
-                          <line x1="-12" y1="0" x2="12" y2="0" stroke="rgba(0, 229, 255, 0.85)" strokeWidth="2.5" strokeLinecap="round" />
-                          <circle cx="0" cy="0" r="1.5" fill="#ffffff" />
+                          <line x1="-2.0" y1="0" x2="2.0" y2="0" stroke="rgba(0, 229, 255, 0.85)" strokeWidth="0.45" strokeLinecap="round" />
+                          <circle cx="0" cy="0" r="0.25" fill="#ffffff" />
                         </g>
                       </g>
                     ))}
 
-                    {/* Indicador REC parpadeando en rojo (Regla 5) */}
-                    {videoProc?.status === 'RUNNING' && !isOff && (
-                      <circle cx="10" cy="-14" r="2.5" fill="#ff3366" className="rec-dot-blink" />
+                    {/* Indicador REC parpadeando (Regla 3 y 5: GRABAR o video_recorder RUNNING) */}
+                    {isRecordActive && (
+                      <circle cx="1.5" cy="-2.0" r="0.45" fill="#ff3366" className="rec-dot-blink" />
                     )}
 
                     {/* Barra de Batería en miniatura sobre el Dron */}
-                    <rect x="-8" y="6" width="16" height="4" rx="1" fill="#1e293b" stroke="#334155" strokeWidth="0.5" />
-                    <rect x="-7" y="7" width={14 * (batteryPct / 100)} height="2" fill={batteryColor} />
+                    <rect x="-1.2" y="1.0" width="2.4" height="0.6" rx="0.15" fill="#1e293b" stroke="#334155" strokeWidth="0.1" />
+                    <rect x="-1.1" y="1.1" width={2.2 * (batteryPct / 100)} height="0.4" fill={batteryColor} />
                   </g>
+
+                  {/* Badge de pausa visible si ESTACIONARIO (Regla 3) */}
+                  {isHoverActive && (
+                    <g transform={`translate(${droneNavState.x}, ${droneNavState.y + 6.8})`}>
+                      <rect x="-9.5" y="-1.8" width="19" height="3.6" rx="0.6" fill="rgba(120, 53, 15, 0.9)" stroke="#f59e0b" strokeWidth="0.3" />
+                      <text x="0" y="0.8" textAnchor="middle" fill="#fef08a" fontFamily="var(--font-mono)" fontSize="1.8" fontWeight="bold">
+                        PAUSA · HOVER
+                      </text>
+                    </g>
+                  )}
 
                   {/* Badge en el mapa si patrol_manager está WAITING (Regla 7) */}
                   {patrolWaiting && (
-                    <g transform={`translate(${droneNavState.x}, ${droneNavState.y - 36})`}>
-                      <rect x="-42" y="-12" width="84" height="18" rx="2" fill="#78350f" stroke="#f59e0b" strokeWidth="1.5" />
-                      <text x="0" y="1" textAnchor="middle" fill="#fbbf24" fontFamily="var(--font-mono)" fontSize="9" fontWeight="bold">
+                    <g transform={`translate(${droneNavState.x}, ${droneNavState.y - 6.5})`}>
+                      <rect x="-8.5" y="-1.9" width="17" height="3.8" rx="0.6" fill="#78350f" stroke="#f59e0b" strokeWidth="0.3" />
+                      <text x="0" y="0.8" textAnchor="middle" fill="#fbbf24" fontFamily="var(--font-mono)" fontSize="1.8" fontWeight="bold">
                         {patrolWaiting.label}
                       </text>
                     </g>
@@ -779,7 +1223,7 @@ export const DigitalTwin: React.FC = () => {
                 </svg>
               </div>
 
-              {/* Leyenda de la ruta */}
+              {/* Leyenda y Coordenadas en Vivo */}
               <div
                 style={{
                   display: 'flex',
@@ -794,13 +1238,17 @@ export const DigitalTwin: React.FC = () => {
                 }}
               >
                 <div>
-                  COORDENADAS UAV: <strong style={{ color: '#fff' }}>({Math.round(droneNavState.x)}, {Math.round(droneNavState.y)})</strong> · RUMBO:{' '}
+                  COORDENADAS UAV:{' '}
+                  <strong style={{ color: '#fff' }}>
+                    ({droneNavState.x.toFixed(1)}, {droneNavState.y.toFixed(1)})
+                  </strong>{' '}
+                  · RUMBO:{' '}
                   <strong style={{ color: 'var(--cyan-primary)' }}>{Math.round(droneNavState.angle)}&deg;</strong>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.9rem' }}>
-                  <span style={{ color: 'var(--cyan-primary)' }}>&bull; RUTA GEOREFERENCIADA</span>
-                  <span style={{ color: 'var(--emerald-radar)' }}>&bull; ALCANCE CONO 120m</span>
-                  <span style={{ color: '#fbbf24' }}>&bull; RETORNO AUTOMÁTICO</span>
+                  <span style={{ color: 'var(--cyan-primary)' }}>&bull; ESCALA 1u = 10m</span>
+                  <span style={{ color: 'var(--emerald-radar)' }}>&bull; HANGAR (50, 92)</span>
+                  <span style={{ color: 'var(--crimson-crit)' }}>&bull; NO-FLY ZONE [60..85, 20..45]</span>
                 </div>
               </div>
             </div>
@@ -898,14 +1346,14 @@ export const DigitalTwin: React.FC = () => {
                   <circle cx="0" cy="0" r="130" fill="none" stroke="rgba(56, 189, 248, 0.1)" strokeWidth="1" strokeDasharray="4 6" />
                   <circle cx="0" cy="0" r="90" fill="none" stroke="rgba(56, 189, 248, 0.08)" strokeWidth="1" />
 
-                  {/* 1. Cono de Escaneo Frontal (Regla 4: vision_detector RUNNING) */}
-                  {visionProc?.status === 'RUNNING' && !isOff && (
+                  {/* 1. Cono de Escaneo Frontal (Regla 3 y 4: ESCANEAR o vision_detector RUNNING) */}
+                  {isScanActive && (
                     <g>
                       <polygon points="0,-48 -140,-150 140,-150" fill="url(#highResScanGlow)" stroke="rgba(0, 255, 136, 0.5)" strokeWidth="1.5" />
                       <line x1="0" y1="-48" x2="0" y2="-150" stroke="rgba(0, 255, 136, 0.6)" strokeWidth="1.5" strokeDasharray="4 4" />
                       <path d="M -110 -130 A 140 140 0 0 1 110 -130" fill="none" stroke="rgba(0, 255, 136, 0.75)" strokeWidth="2" />
                       <text x="0" y="-136" textAnchor="middle" fill="var(--emerald-radar)" fontFamily="var(--font-mono)" fontSize="9" fontWeight="bold">
-                        CONO DE ESCANEO ACTIVO (VISION DETECTOR)
+                        CONO DE ESCANEO ACTIVO ({droneNavState.activeAction === 'ESCANEAR' ? 'WAYPOINT ESCANEAR' : 'VISION DETECTOR'})
                       </text>
                     </g>
                   )}
@@ -960,7 +1408,7 @@ export const DigitalTwin: React.FC = () => {
                     </g>
                   )}
 
-                  {/* 6. Indicador REC (Regla 5: video_recorder RUNNING) */}
+                  {/* 6. Indicador REC (Regla 3 y 5: GRABAR o video_recorder RUNNING) */}
                   <g transform="translate(26, -34)">
                     <rect x="-6" y="-8" width="38" height="15" rx="2" fill="#0f172a" stroke="rgba(56, 189, 248, 0.3)" strokeWidth="0.8" />
                     <circle
@@ -970,13 +1418,13 @@ export const DigitalTwin: React.FC = () => {
                       fill={
                         videoWaiting
                           ? '#f59e0b'
-                          : videoProc?.status === 'RUNNING' && !isOff
+                          : isRecordActive
                           ? '#ff3366'
                           : '#475569'
                       }
-                      className={videoProc?.status === 'RUNNING' && !isOff && !videoWaiting ? 'rec-dot-blink' : ''}
+                      className={isRecordActive && !videoWaiting ? 'rec-dot-blink' : ''}
                     />
-                    <text x="7" y="3" fill={videoProc?.status === 'RUNNING' && !isOff ? '#ff3366' : '#94a3b8'} fontFamily="var(--font-mono)" fontSize="8" fontWeight="bold">
+                    <text x="7" y="3" fill={isRecordActive ? '#ff3366' : '#94a3b8'} fontFamily="var(--font-mono)" fontSize="8" fontWeight="bold">
                       REC
                     </text>
                   </g>
@@ -994,7 +1442,6 @@ export const DigitalTwin: React.FC = () => {
                   {/* 7. Bahía de Batería (battery_pack, Regla 9) */}
                   <g transform="translate(0, -6)">
                     <rect x="-24" y="-8" width="48" height="18" rx="2" fill="#1e293b" stroke={getDeviceStyle(batteryDev).color} strokeWidth="1.5" className={getDeviceStyle(batteryDev).isFault ? 'fault-flash' : ''} />
-                    {/* Barra de progreso de batería */}
                     <rect x="-21" y="-5" width={42 * (batteryPct / 100)} height="12" rx="1" fill={batteryColor} />
                     <text x="0" y="4" textAnchor="middle" fill="#ffffff" fontFamily="var(--font-mono)" fontSize="8.5" fontWeight="bold">
                       BAT {batteryPct}%
@@ -1019,13 +1466,11 @@ export const DigitalTwin: React.FC = () => {
                   )}
 
                   {/* 9. Sensores Superiores: motion_sensor y gps_module */}
-                  {/* motion_sensor */}
                   <g transform="translate(-16, -26)">
                     <circle cx="0" cy="0" r="5" fill="#1e293b" stroke={getDeviceStyle(motionDev).color} strokeWidth="1.5" className={getDeviceStyle(motionDev).isFault ? 'fault-flash' : ''} />
                     <circle cx="0" cy="0" r="2" fill={getDeviceStyle(motionDev).color} />
                   </g>
 
-                  {/* gps_module */}
                   <g transform="translate(16, -26)">
                     <rect x="-4" y="-4" width="8" height="8" rx="1" fill="#1e293b" stroke={getDeviceStyle(gpsDev).color} strokeWidth="1.5" className={getDeviceStyle(gpsDev).isFault ? 'fault-flash' : ''} />
                     <circle cx="0" cy="0" r="1.5" fill={getDeviceStyle(gpsDev).color} />
@@ -1050,7 +1495,6 @@ export const DigitalTwin: React.FC = () => {
                     { x: -105, y: 75, label: 'M4 (RL)' },
                   ].map((m) => (
                     <g key={m.label} transform={`translate(${m.x}, ${m.y})`}>
-                      {/* Aro motor */}
                       <circle
                         cx="0"
                         cy="0"
@@ -1072,14 +1516,11 @@ export const DigitalTwin: React.FC = () => {
                           transformOrigin: '0px 0px',
                         }}
                       >
-                        {/* Pala A */}
                         <path d="M 0 0 C 12 -8, 28 -6, 38 0 C 28 6, 12 8, 0 0 Z" fill="rgba(0, 229, 255, 0.85)" stroke="#38bdf8" strokeWidth="1" />
-                        {/* Pala B */}
                         <path d="M 0 0 C -12 8, -28 6, -38 0 C -28 -6, -12 -8, 0 0 Z" fill="rgba(0, 229, 255, 0.85)" stroke="#38bdf8" strokeWidth="1" />
                         <circle cx="0" cy="0" r="3.5" fill="#ffffff" />
                       </g>
 
-                      {/* Etiqueta del Motor */}
                       <text x="0" y="27" textAnchor="middle" fill="var(--text-dim)" fontFamily="var(--font-mono)" fontSize="8">
                         {m.label}
                       </text>
@@ -1141,9 +1582,187 @@ export const DigitalTwin: React.FC = () => {
         </div>
 
         {/* ===================================================================
-            COLUMNA DERECHA: PANEL LATERAL "ESTADO DEL KERNEL → DRON" (REGLA 3)
+            COLUMNA DERECHA: PANEL LATERAL "ESTADO DEL KERNEL → DRON" Y MISIÓN
             =================================================================== */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+          {/* PANEL DE NAVEGACIÓN Y WAYPOINTS (Regla 3: Waypoint actual, Siguiente, Ticks restantes) */}
+          <div
+            className="hud-panel"
+            style={{
+              padding: '1.25rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.85rem',
+              border: '1px solid rgba(0, 229, 255, 0.3)',
+              boxShadow: '0 0 16px rgba(0, 229, 255, 0.05)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                borderBottom: '1px solid rgba(56, 189, 248, 0.15)',
+                paddingBottom: '0.6rem',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                <MapPin size={17} style={{ color: 'var(--cyan-primary)' }} />
+                <div>
+                  <h4
+                    style={{
+                      margin: 0,
+                      fontFamily: 'var(--font-display)',
+                      fontSize: '1rem',
+                      fontWeight: 700,
+                      color: '#ffffff',
+                      letterSpacing: '0.06em',
+                    }}
+                  >
+                    NAVEGACIÓN & WAYPOINTS
+                  </h4>
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.66rem', color: 'var(--text-dim)' }}>
+                    {hasActiveRoute ? `MISIÓN ACTIVA: ${activeRoute?.name}` : 'MISIÓN CIRCULAR DE CONTINGENCIA'}
+                  </div>
+                </div>
+              </div>
+
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '0.68rem',
+                  padding: '0.15rem 0.5rem',
+                  backgroundColor: hasActiveRoute ? 'rgba(0, 255, 136, 0.15)' : 'rgba(234, 179, 8, 0.15)',
+                  color: hasActiveRoute ? 'var(--emerald-radar)' : '#fbbf24',
+                  border: `1px solid ${hasActiveRoute ? 'rgba(0, 255, 136, 0.35)' : 'rgba(234, 179, 8, 0.35)'}`,
+                  borderRadius: '2px',
+                }}
+              >
+                {hasActiveRoute ? 'RUTA ACTIVA' : 'RUTA DEFECTO'}
+              </span>
+            </div>
+
+            {/* Los 3 campos solicitados en el requerimiento 3 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              {/* 1. Waypoint actual */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '2px',
+                  padding: '0.65rem 0.75rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.2rem',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-dim)', letterSpacing: '0.05em' }}>
+                    WAYPOINT ACTUAL
+                  </span>
+                  {droneNavState.activeAction && (
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.62rem',
+                        color:
+                          droneNavState.activeAction === 'ESCANEAR'
+                            ? 'var(--emerald-radar)'
+                            : droneNavState.activeAction === 'GRABAR'
+                            ? '#ff3366'
+                            : droneNavState.activeAction === 'ESTACIONARIO'
+                            ? '#fbbf24'
+                            : 'var(--cyan-primary)',
+                        fontWeight: 700,
+                      }}
+                    >
+                      ACCIÓN: {droneNavState.activeAction}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontFamily: 'var(--font-display)', fontSize: '0.98rem', fontWeight: 700, color: '#ffffff' }}>
+                  {navTelemetry.waypointActual}
+                </div>
+              </div>
+
+              {/* 2. Siguiente */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '2px',
+                  padding: '0.65rem 0.75rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.2rem',
+                }}
+              >
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-dim)', letterSpacing: '0.05em' }}>
+                  SIGUIENTE
+                </span>
+                <div style={{ fontFamily: 'var(--font-display)', fontSize: '0.98rem', fontWeight: 700, color: 'var(--cyan-primary)' }}>
+                  {navTelemetry.waypointSiguiente}
+                </div>
+              </div>
+
+              {/* 3. Ticks restantes */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '2px',
+                  padding: '0.65rem 0.75rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.2rem',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-dim)', letterSpacing: '0.05em' }}>
+                    TICKS RESTANTES
+                  </span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-dim)' }}>
+                    Progreso: {(patrolProgress * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem' }}>
+                  <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.45rem', fontWeight: 700, color: '#ffffff', lineHeight: 1 }}>
+                    {navTelemetry.ticksRestantes}
+                  </span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    ticks de CPU ({patrolBurstRem} / {patrolBurstTotal} ráfaga)
+                  </span>
+                </div>
+                <div className="hud-progress-track" style={{ marginTop: '4px' }}>
+                  <div
+                    className="hud-progress-fill cyan"
+                    style={{ width: `${(patrolProgress * 100).toFixed(1)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Resumen de la ruta */}
+            <div
+              style={{
+                padding: '0.5rem 0.75rem',
+                backgroundColor: 'rgba(15, 23, 42, 0.4)',
+                border: '1px dashed var(--border-subtle)',
+                borderRadius: '2px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.68rem',
+                color: 'var(--text-dim)',
+              }}
+            >
+              <span>Distancia: <strong style={{ color: '#fff' }}>{totalRouteDistance.toFixed(1)}m</strong></span>
+              <span>Waypoints: <strong style={{ color: 'var(--cyan-primary)' }}>{effectiveWaypoints.length}</strong></span>
+              <span>Base: <strong style={{ color: 'var(--emerald-radar)' }}>BASE (50,92)</strong></span>
+            </div>
+          </div>
+
           {/* Panel Lateral: Estado del Kernel */}
           <div
             className="hud-panel"
@@ -1379,7 +1998,7 @@ export const DigitalTwin: React.FC = () => {
             </div>
           </div>
 
-          {/* TABLA DE CORRESPONDENCIA KERNEL -> DRON (REGLA 3) */}
+          {/* TABLA DE CORRESPONDENCIA KERNEL -> DRON (Regla 3) */}
           <div
             className="hud-panel"
             style={{
@@ -1448,7 +2067,7 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      Dron en tierra, hélices quietas, todo en escala de grises.
+                      Dron en tierra (Base Alpha), hélices quietas, todo en escala de grises.
                     </td>
                   </tr>
 
@@ -1478,7 +2097,7 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      El dron avanza sobre la ruta de 4 waypoints según su progreso de ráfaga.
+                      El dron avanza sobre la ruta activa por distancia acumulada (o circular por defecto si no hay misión activa).
                     </td>
                   </tr>
 
@@ -1493,7 +2112,7 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      Dron suspendido en vuelo estacionario en su coordenada actual.
+                      Dron suspendido en vuelo estacionario en su coordenada actual del recorrido.
                     </td>
                   </tr>
 
@@ -1508,11 +2127,26 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      Misión terminada: el dron regresa a Base Alpha.
+                      Misión terminada: el dron regresa automáticamente a Base Alpha (50, 92).
                     </td>
                   </tr>
 
-                  {/* Fila 6: vision_detector */}
+                  {/* Fila 6: Acciones en Waypoints */}
+                  <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
+                    <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
+                      Acción en Waypoint
+                    </td>
+                    <td style={{ padding: '0.5rem' }}>
+                      <span style={{ color: 'var(--emerald-radar)' }}>ESCANEAR</span> /{' '}
+                      <span style={{ color: '#ff3366' }}>GRABAR</span> /{' '}
+                      <span style={{ color: '#fbbf24' }}>ESTAC.</span>
+                    </td>
+                    <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
+                      ESCANEAR proyecta cono óptico; GRABAR activa indicador REC; ESTACIONARIO activa pausa visible (HOVER).
+                    </td>
+                  </tr>
+
+                  {/* Fila 7: vision_detector */}
                   <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       vision_detector
@@ -1523,11 +2157,11 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      Cono de escaneo óptico e IA proyectado bajo la cámara.
+                      Cono de escaneo óptico e IA proyectado bajo la cámara frontal.
                     </td>
                   </tr>
 
-                  {/* Fila 7: video_recorder */}
+                  {/* Fila 8: video_recorder */}
                   <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       video_recorder
@@ -1542,7 +2176,7 @@ export const DigitalTwin: React.FC = () => {
                     </td>
                   </tr>
 
-                  {/* Fila 8: comm_link */}
+                  {/* Fila 9: comm_link */}
                   <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       comm_link
@@ -1553,11 +2187,11 @@ export const DigitalTwin: React.FC = () => {
                       </span>
                     </td>
                     <td style={{ padding: '0.5rem', color: '#cbd5e1' }}>
-                      Ondas de radiofrecuencia animadas emitiendo en la antena.
+                      Ondas de radiofrecuencia animadas emitiendo en la antena trasera.
                     </td>
                   </tr>
 
-                  {/* Fila 9: Procesos en WAITING */}
+                  {/* Fila 10: Procesos en WAITING */}
                   <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       Cualquier Proceso
@@ -1572,7 +2206,7 @@ export const DigitalTwin: React.FC = () => {
                     </td>
                   </tr>
 
-                  {/* Fila 10: Dispositivos */}
+                  {/* Fila 11: Dispositivos */}
                   <tr style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.08)' }}>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       devices (6 hardware)
@@ -1585,7 +2219,7 @@ export const DigitalTwin: React.FC = () => {
                     </td>
                   </tr>
 
-                  {/* Fila 11: Batería */}
+                  {/* Fila 12: Batería */}
                   <tr>
                     <td style={{ padding: '0.5rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
                       battery_pack

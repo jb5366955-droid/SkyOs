@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { kernelEngine } from '../kernel/engine';
+import { TechnicalTooltip } from '../components/Common/TechnicalTooltip';
 import type {
   SystemState,
   Device,
@@ -367,7 +368,7 @@ export const Faults: React.FC = () => {
                 letterSpacing: '0.04em',
               }}
             >
-              SIMULACIÓN DE CONTINGENCIAS · PROTOCOLOS DE FAILSAFE (RTH, HOVER, LAND) · TELEMETRÍA EN VIVO
+              SIMULACIÓN DE CONTINGENCIAS · <TechnicalTooltip termKey="failsafe">PROTOCOLOS DE FAILSAFE</TechnicalTooltip> (RTH, HOVER, LAND) · TELEMETRÍA EN VIVO
             </div>
           </div>
         </div>

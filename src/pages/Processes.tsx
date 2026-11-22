@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import type { Process, ProcessStatus, SystemState } from '../types/skyos.types';
 import { CreateProcessModal } from '../components/Processes/CreateProcessModal';
 import { RlsAlerts } from '../components/Processes/RlsAlerts';
+import { TechnicalTooltip } from '../components/Common/TechnicalTooltip';
 import {
   Layers,
   Plus,
@@ -677,7 +678,9 @@ export const Processes: React.FC = () => {
                 <th style={{ padding: '0.65rem 0.75rem' }}>PROCESO / SUBSISTEMA</th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '120px' }}>ESTADO</th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '100px' }}>PRIORIDAD</th>
-                <th style={{ padding: '0.65rem 0.75rem', width: '120px', textAlign: 'center' }}>RÁFAGA (TICKS)</th>
+                <th style={{ padding: '0.65rem 0.75rem', width: '120px', textAlign: 'center' }}>
+                  <TechnicalTooltip termKey="burst">RÁFAGA (TICKS)</TechnicalTooltip>
+                </th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '85px', textAlign: 'right' }}>CPU (%)</th>
                 <th style={{ padding: '0.65rem 0.75rem', width: '90px', textAlign: 'right' }}>MEMORIA</th>
                 <th style={{ padding: '0.65rem 0.75rem', textAlign: 'right', minWidth: '220px' }}>ACCIONES (TRANSICIONES)</th>
@@ -685,15 +688,71 @@ export const Processes: React.FC = () => {
             </thead>
             <tbody>
               {loading ? (
-                <tr>
-                  <td colSpan={8} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
-                    Leyendo tabla de control de procesos desde Supabase...
-                  </td>
-                </tr>
+                Array.from({ length: 6 }).map((_, i) => (
+                  <tr key={`skel-prc-${i}`} style={{ borderBottom: '1px solid rgba(56, 189, 248, 0.06)' }}>
+                    <td style={{ padding: '0.75rem' }}><div className="skeleton-box" style={{ width: '28px', height: '14px' }} /></td>
+                    <td style={{ padding: '0.75rem' }}>
+                      <div className="skeleton-box" style={{ width: '140px', height: '16px', marginBottom: '4px' }} />
+                      <div className="skeleton-box" style={{ width: '80px', height: '10px' }} />
+                    </td>
+                    <td style={{ padding: '0.75rem' }}><div className="skeleton-box" style={{ width: '65px', height: '18px' }} /></td>
+                    <td style={{ padding: '0.75rem' }}><div className="skeleton-box" style={{ width: '55px', height: '16px' }} /></td>
+                    <td style={{ padding: '0.75rem', textAlign: 'center' }}><div className="skeleton-box" style={{ width: '60px', height: '14px', margin: '0 auto' }} /></td>
+                    <td style={{ padding: '0.75rem', textAlign: 'right' }}><div className="skeleton-box" style={{ width: '40px', height: '14px', marginLeft: 'auto' }} /></td>
+                    <td style={{ padding: '0.75rem', textAlign: 'right' }}><div className="skeleton-box" style={{ width: '50px', height: '14px', marginLeft: 'auto' }} /></td>
+                    <td style={{ padding: '0.75rem', textAlign: 'right' }}><div className="skeleton-box" style={{ width: '130px', height: '22px', marginLeft: 'auto' }} /></td>
+                  </tr>
+                ))
               ) : filteredProcesses.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ padding: '3rem', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)' }}>
-                    No se encontraron procesos que coincidan con el filtro actual.
+                  <td colSpan={8} style={{ padding: '3rem 1rem', textAlign: 'center' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '0.85rem' }}>
+                      <div
+                        style={{
+                          width: '46px',
+                          height: '46px',
+                          borderRadius: '50%',
+                          backgroundColor: 'rgba(56, 189, 248, 0.08)',
+                          border: '1px dashed rgba(56, 189, 248, 0.35)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'var(--text-dim)',
+                        }}
+                      >
+                        <Layers size={22} />
+                      </div>
+                      <div>
+                        <div style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem', fontWeight: 700, color: '#ffffff' }}>
+                          No hay procesos listos. Crea uno
+                        </div>
+                        <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+                          No se encontraron procesos en la cola activa con los criterios actuales.
+                        </div>
+                      </div>
+                      {role === 'ADMIN' ? (
+                        <button
+                          onClick={() => setIsCreateModalOpen(true)}
+                          className="btn-tactical"
+                          style={{ padding: '0.45rem 1rem', fontSize: '0.8rem' }}
+                        >
+                          <Plus size={14} />
+                          <span>CREAR NUEVO PROCESO</span>
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setSearchQuery('');
+                            setStatusFilter('ALL');
+                          }}
+                          className="btn-tactical"
+                          style={{ padding: '0.45rem 1rem', fontSize: '0.8rem' }}
+                        >
+                          <RotateCcw size={14} />
+                          <span>RESTABLECER FILTROS</span>
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ) : (

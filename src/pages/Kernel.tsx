@@ -5,6 +5,7 @@ import type { SystemState, Process, SystemEvent, SchedulerType } from '../types/
 import { kernelEngine } from '../kernel/engine';
 import { GanttChart } from '../components/Kernel/GanttChart';
 import { EventsList } from '../components/Kernel/EventsList';
+import { TechnicalTooltip } from '../components/Common/TechnicalTooltip';
 import {
   Cpu,
   Power,
@@ -635,7 +636,7 @@ export const Kernel: React.FC = () => {
                 letterSpacing: '0.08em',
               }}
             >
-              RELOJ DEL KERNEL (TICK)
+              <TechnicalTooltip termKey="tick">RELOJ DEL KERNEL (TICK)</TechnicalTooltip>
             </span>
             <Clock size={16} style={{ color: 'var(--cyan-primary)' }} />
           </div>
@@ -684,7 +685,7 @@ export const Kernel: React.FC = () => {
                 letterSpacing: '0.08em',
               }}
             >
-              PLANIFICADOR (SCHEDULER)
+              <TechnicalTooltip termKey="scheduler">PLANIFICADOR (SCHEDULER)</TechnicalTooltip>
             </span>
             <Shield size={16} style={{ color: 'var(--text-tactical)' }} />
           </div>
@@ -737,7 +738,7 @@ export const Kernel: React.FC = () => {
                 letterSpacing: '0.08em',
               }}
             >
-              QUANTUM DE CPU
+              <TechnicalTooltip termKey="quantum">QUANTUM DE CPU</TechnicalTooltip>
             </span>
             <Settings size={16} style={{ color: 'var(--amber-warn)' }} />
           </div>
@@ -787,7 +788,7 @@ export const Kernel: React.FC = () => {
                 letterSpacing: '0.08em',
               }}
             >
-              CAMBIOS DE CONTEXTO
+              <TechnicalTooltip termKey="cambio de contexto">CAMBIOS DE CONTEXTO</TechnicalTooltip>
             </span>
             <Layers size={16} style={{ color: 'var(--cyan-primary)' }} />
           </div>

@@ -1,35 +1,36 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
-  --font-display: 'Rajdhani', sans-serif;
+  /* Tipografía con carácter: Títulos en Space Grotesk, datos en JetBrains Mono */
+  --font-display: 'Space Grotesk', -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
   --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 
-  /* Tactical Palette */
-  --bg-deep: #050811;
-  --bg-surface: #0a1120;
-  --bg-surface-elevated: #0f192c;
-  --bg-card: rgba(13, 22, 38, 0.85);
-  --bg-card-hover: rgba(18, 30, 52, 0.95);
+  /* Tactical Drone Control Center Palette */
+  --bg-deep: #040814;
+  --bg-surface: #091222;
+  --bg-surface-elevated: #0e1a30;
+  --bg-card: rgba(10, 18, 34, 0.82);
+  --bg-card-hover: rgba(16, 28, 52, 0.92);
 
   /* Cyber & HUD Accents */
   --cyan-primary: #00e5ff;
-  --cyan-glow: rgba(0, 229, 255, 0.25);
+  --cyan-glow: rgba(0, 229, 255, 0.28);
   --cyan-dim: #007791;
 
   --emerald-radar: #00ff88;
-  --emerald-glow: rgba(0, 255, 136, 0.25);
+  --emerald-glow: rgba(0, 255, 136, 0.28);
 
   --amber-warn: #ffb703;
-  --amber-glow: rgba(255, 183, 3, 0.25);
+  --amber-glow: rgba(255, 183, 3, 0.28);
 
   --crimson-crit: #ff3366;
-  --crimson-glow: rgba(255, 51, 102, 0.3);
+  --crimson-glow: rgba(255, 51, 102, 0.35);
 
   /* Borders & Lines */
-  --border-subtle: rgba(56, 189, 248, 0.15);
-  --border-strong: rgba(56, 189, 248, 0.35);
-  --border-glow: rgba(0, 229, 255, 0.6);
+  --border-subtle: rgba(56, 189, 248, 0.18);
+  --border-strong: rgba(56, 189, 248, 0.38);
+  --border-glow: rgba(0, 229, 255, 0.65);
 
   /* Text */
   --text-main: #f1f5f9;
@@ -39,7 +40,7 @@
 
   /* Shadows */
   --shadow-hud: 0 4px 24px -1px rgba(0, 0, 0, 0.7), 0 0 16px -2px var(--cyan-glow);
-  --shadow-panel: 0 8px 32px 0 rgba(0, 0, 0, 0.6);
+  --shadow-panel: 0 8px 32px 0 rgba(0, 0, 0, 0.65);
 }
 
 *, *::before, *::after {
@@ -67,26 +68,67 @@ html, body {
   flex-direction: column;
 }
 
-/* Background HUD Grid & Ambient Glow */
+/* =======================================================
+   1. FONDO CON RADAR O MALLA ANIMADA MUY SUAVE
+   ======================================================= */
 .hud-grid-background {
   background-color: var(--bg-deep);
   background-image: 
-    linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px),
-    radial-gradient(circle at 50% 20%, rgba(0, 229, 255, 0.08) 0%, transparent 65%),
-    radial-gradient(circle at 85% 85%, rgba(0, 255, 136, 0.04) 0%, transparent 50%);
-  background-size: 32px 32px, 32px 32px, 100% 100%, 100% 100%;
+    linear-gradient(rgba(0, 229, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 50% 25%, rgba(0, 229, 255, 0.08) 0%, transparent 68%),
+    radial-gradient(circle at 85% 85%, rgba(0, 255, 136, 0.05) 0%, transparent 50%);
+  background-size: 36px 36px, 36px 36px, 100% 100%, 100% 100%;
   background-attachment: fixed;
+  position: relative;
 }
 
-/* Tactical Card / HUD Panel */
+/* Radar Sweep Ambient Animado (Suave y no intrusivo) */
+.radar-sweep-ambient {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+  opacity: 0.38;
+}
+
+.radar-sweep-beam {
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    rgba(0, 229, 255, 0) 0deg,
+    rgba(0, 229, 255, 0) 280deg,
+    rgba(0, 229, 255, 0.025) 330deg,
+    rgba(0, 229, 255, 0.08) 360deg
+  );
+  animation: ambientRadarRotate 22s linear infinite;
+}
+
+@keyframes ambientRadarRotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* =======================================================
+   2. PANELES TIPO CRISTAL CON BRILLO SUTIL (GLASSMORPHISM)
+   ======================================================= */
 .hud-panel {
   background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border-subtle);
+  border-radius: 4px;
   position: relative;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .hud-panel::before {
@@ -115,10 +157,12 @@ html, body {
 
 .hud-panel:hover {
   border-color: var(--border-strong);
-  box-shadow: 0 4px 20px rgba(0, 229, 255, 0.08);
+  box-shadow: 0 12px 36px 0 rgba(0, 0, 0, 0.7), 0 0 20px rgba(0, 229, 255, 0.08), inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
 }
 
-/* Tactical Buttons */
+/* =======================================================
+   3. BOTONES TÁCTICOS Y FOCO VISIBLE
+   ======================================================= */
 .btn-tactical {
   display: inline-flex;
   align-items: center;
@@ -128,21 +172,21 @@ html, body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 0.95rem;
-  padding: 0.65rem 1.4rem;
+  font-size: 0.9rem;
+  padding: 0.6rem 1.3rem;
   cursor: pointer;
   border: 1px solid var(--cyan-primary);
-  background: linear-gradient(180deg, rgba(0, 229, 255, 0.15) 0%, rgba(0, 229, 255, 0.05) 100%);
+  background: linear-gradient(180deg, rgba(0, 229, 255, 0.15) 0%, rgba(0, 229, 255, 0.04) 100%);
   color: var(--cyan-primary);
-  border-radius: 2px;
+  border-radius: 3px;
   position: relative;
   overflow: hidden;
-  transition: all 0.2s ease;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
 }
 
 .btn-tactical:hover:not(:disabled) {
-  background: linear-gradient(180deg, rgba(0, 229, 255, 0.3) 0%, rgba(0, 229, 255, 0.12) 100%);
+  background: linear-gradient(180deg, rgba(0, 229, 255, 0.28) 0%, rgba(0, 229, 255, 0.1) 100%);
   color: #ffffff;
   border-color: #5ceeff;
   box-shadow: 0 0 20px rgba(0, 229, 255, 0.45);
@@ -161,19 +205,123 @@ html, body {
 
 .btn-danger {
   border-color: var(--crimson-crit);
-  background: linear-gradient(180deg, rgba(255, 51, 102, 0.15) 0%, rgba(255, 51, 102, 0.05) 100%);
+  background: linear-gradient(180deg, rgba(255, 51, 102, 0.15) 0%, rgba(255, 51, 102, 0.04) 100%);
   color: var(--crimson-crit);
   box-shadow: 0 0 12px rgba(255, 51, 102, 0.2);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: linear-gradient(180deg, rgba(255, 51, 102, 0.3) 0%, rgba(255, 51, 102, 0.12) 100%);
+  background: linear-gradient(180deg, rgba(255, 51, 102, 0.28) 0%, rgba(255, 51, 102, 0.1) 100%);
   color: #ffffff;
   border-color: #ff668f;
   box-shadow: 0 0 20px rgba(255, 51, 102, 0.5);
 }
 
-/* Tactical Inputs */
+/* Foco y Accesibilidad Visibles en Botones, Enlaces e Inputs */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--cyan-primary) !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 14px var(--cyan-glow) !important;
+}
+
+/* =======================================================
+   4. TARJETAS DE ACCIÓN RÁPIDA (CENTRO DE MISIÓN)
+   ======================================================= */
+.quick-action-card {
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.quick-action-card:hover {
+  border-color: var(--cyan-primary) !important;
+  box-shadow: 0 6px 20px rgba(0, 229, 255, 0.2) !important;
+  transform: translateY(-2px);
+  background-color: rgba(18, 30, 54, 0.95) !important;
+}
+
+/* =======================================================
+   5. SKELETONS Y ESTADOS DE CARGA SHIMMER
+   ======================================================= */
+.skeleton-box {
+  background: linear-gradient(
+    90deg,
+    rgba(20, 32, 54, 0.7) 0%,
+    rgba(56, 189, 248, 0.16) 50%,
+    rgba(20, 32, 54, 0.7) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.5s infinite ease-in-out;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+@keyframes skeletonShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* =======================================================
+   6. TRANSICIÓN SUAVE ENTRE PÁGINAS
+   ======================================================= */
+.page-fade-in {
+  animation: pageFadeIn 0.26s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes pageFadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* =======================================================
+   7. BARRAS DE PROGRESO CON TRANSICIÓN SUAVE
+   ======================================================= */
+.hud-progress-track {
+  width: 100%;
+  height: 7px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.hud-progress-fill {
+  height: 100%;
+  transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.4s ease;
+  position: relative;
+}
+
+.hud-progress-fill.cyan {
+  background: linear-gradient(90deg, #007791 0%, var(--cyan-primary) 100%);
+  box-shadow: 0 0 10px var(--cyan-glow);
+}
+
+.hud-progress-fill.emerald {
+  background: linear-gradient(90deg, #059669 0%, var(--emerald-radar) 100%);
+  box-shadow: 0 0 10px var(--emerald-glow);
+}
+
+.hud-progress-fill.amber {
+  background: linear-gradient(90deg, #d97706 0%, var(--amber-warn) 100%);
+  box-shadow: 0 0 10px var(--amber-glow);
+}
+
+.hud-progress-fill.crimson {
+  background: linear-gradient(90deg, #be123c 0%, var(--crimson-crit) 100%);
+  box-shadow: 0 0 10px var(--crimson-glow);
+}
+
+/* =======================================================
+   8. INPUTS TÁCTICOS
+   ======================================================= */
 .hud-input {
   width: 100%;
   padding: 0.75rem 1rem;
@@ -198,7 +346,9 @@ html, body {
   font-family: var(--font-body);
 }
 
-/* Status Badges */
+/* =======================================================
+   9. STATUS BADGES Y ROLES
+   ======================================================= */
 .badge-role {
   display: inline-flex;
   align-items: center;
@@ -234,92 +384,7 @@ html, body {
   box-shadow: 0 0 8px rgba(255, 183, 3, 0.2);
 }
 
-/* Pulse indicator */
-.pulse-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background-color: currentColor;
-  box-shadow: 0 0 8px currentColor;
-  animation: radar-pulse 2s infinite ease-in-out;
-}
-
-@keyframes radar-pulse {
-  0% { transform: scale(0.95); opacity: 0.7; }
-  50% { transform: scale(1.3); opacity: 1; }
-  100% { transform: scale(0.95); opacity: 0.7; }
-}
-
-/* Scanline effect */
-.scanlines {
-  position: relative;
-}
-.scanlines::after {
-  content: " ";
-  display: block;
-  position: absolute;
-  top: 0; left: 0; bottom: 0; right: 0;
-  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
-  background-size: 100% 4px;
-  z-index: 20;
-  pointer-events: none;
-  opacity: 0.4;
-}
-
-/* Scrollbars */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: var(--bg-deep);
-}
-::-webkit-scrollbar-thumb {
-  background: #1e3a5f;
-  border-radius: 2px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--cyan-dim);
-}
-
-/* Tactical Progress Bar */
-.hud-progress-track {
-  width: 100%;
-  height: 7px;
-  background: rgba(15, 23, 42, 0.9);
-  border: 1px solid rgba(56, 189, 248, 0.2);
-  border-radius: 2px;
-  overflow: hidden;
-  position: relative;
-}
-
-.hud-progress-fill {
-  height: 100%;
-  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  position: relative;
-}
-
-.hud-progress-fill.cyan {
-  background: linear-gradient(90deg, #007791 0%, var(--cyan-primary) 100%);
-  box-shadow: 0 0 10px var(--cyan-glow);
-}
-
-.hud-progress-fill.emerald {
-  background: linear-gradient(90deg, #059669 0%, var(--emerald-radar) 100%);
-  box-shadow: 0 0 10px var(--emerald-glow);
-}
-
-.hud-progress-fill.amber {
-  background: linear-gradient(90deg, #d97706 0%, var(--amber-warn) 100%);
-  box-shadow: 0 0 10px var(--amber-glow);
-}
-
-.hud-progress-fill.crimson {
-  background: linear-gradient(90deg, #be123c 0%, var(--crimson-crit) 100%);
-  box-shadow: 0 0 10px var(--crimson-glow);
-}
-
-/* Process Status Colors */
+/* Process Status Badges */
 .badge-status {
   display: inline-flex;
   align-items: center;
@@ -401,7 +466,7 @@ html, body {
   border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
-/* Semáforo LED Indicators */
+/* Semáforo LED */
 .led-light {
   width: 10px;
   height: 10px;
@@ -427,65 +492,46 @@ html, body {
   animation: radar-pulse 1s infinite ease-in-out;
 }
 
-/* Overall Status Banner */
-.status-pill-lg {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.5rem 1.1rem;
-  border-radius: 2px;
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+/* Pulse indicator */
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  animation: radar-pulse 2s infinite ease-in-out;
 }
 
-.status-pill-lg.NORMAL {
-  color: var(--emerald-radar);
-  background: rgba(0, 255, 136, 0.12);
-  border: 1px solid rgba(0, 255, 136, 0.4);
-  box-shadow: 0 0 18px rgba(0, 255, 136, 0.2);
-}
-
-.status-pill-lg.ALERTA {
-  color: var(--amber-warn);
-  background: rgba(255, 183, 3, 0.15);
-  border: 1px solid rgba(255, 183, 3, 0.45);
-  box-shadow: 0 0 18px rgba(255, 183, 3, 0.25);
-}
-
-.status-pill-lg.CRÍTICO {
-  color: var(--crimson-crit);
-  background: rgba(255, 51, 102, 0.15);
-  border: 1px solid rgba(255, 51, 102, 0.5);
-  box-shadow: 0 0 20px rgba(255, 51, 102, 0.35);
+@keyframes radar-pulse {
+  0% { transform: scale(0.95); opacity: 0.7; }
+  50% { transform: scale(1.3); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.7; }
 }
 
 /* =======================================================
-   HUD Navigation Tabs
+   10. HUD NAVBAR TABS
    ======================================================= */
 .hud-navbar-nav {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .hud-nav-tab {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.42rem 0.85rem;
+  gap: 0.4rem;
+  padding: 0.38rem 0.75rem;
   border-radius: 2px;
   font-family: var(--font-display);
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-decoration: none;
   color: var(--text-muted);
   border: 1px solid transparent;
   background: transparent;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .hud-nav-tab:hover {
@@ -502,7 +548,7 @@ html, body {
 }
 
 /* =======================================================
-   Process Action Buttons & Badges
+   11. PROCESS ACTION BUTTONS
    ======================================================= */
 .btn-action {
   display: inline-flex;
@@ -613,7 +659,7 @@ html, body {
 }
 
 /* =======================================================
-   RLS Alerts
+   12. RLS ALERTS
    ======================================================= */
 .rls-alert-danger {
   display: flex;
@@ -647,7 +693,7 @@ html, body {
 }
 
 /* =======================================================
-   Modal Styling
+   13. MODALS
    ======================================================= */
 .hud-modal-overlay {
   position: fixed;
@@ -678,15 +724,63 @@ html, body {
 }
 
 /* =======================================================
-   Row States
+   14. SCROLLBARS Y RESPONSIVE
    ======================================================= */
-.row-terminated {
-  opacity: 0.42;
-  filter: grayscale(0.5);
-  transition: opacity 0.2s ease;
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
-.row-terminated:hover {
-  opacity: 0.6;
+::-webkit-scrollbar-track {
+  background: var(--bg-deep);
+}
+::-webkit-scrollbar-thumb {
+  background: #1e3a5f;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cyan-dim);
 }
 
+@media (max-width: 768px) {
+  .app-main-content {
+    padding: 0.75rem !important;
+  }
+  .hud-panel {
+    padding: 1rem !important;
+  }
+}
+
+/* =======================================================
+   15. ESTILOS DE INTERACCIÓN: TOASTS, AYUDA Y ATAJOS
+   ======================================================= */
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.15);
+  }
+}
+
+.toast-card:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.1);
+}
+
+@media (max-width: 640px) {
+  .desktop-only-text {
+    display: none !important;
+  }
+}
 

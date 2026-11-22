@@ -1,13 +1,24 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import type { Process, Device, SystemEvent, SystemResources, OverallSystemStatus, MemoryBlock } from '../types/skyos.types';
+import { kernelEngine } from '../kernel/engine';
+import type {
+  Process,
+  Device,
+  SystemEvent,
+  SystemResources,
+  OverallSystemStatus,
+  MemoryBlock,
+  SystemState,
+} from '../types/skyos.types';
 import { MetricCard } from '../components/Dashboard/MetricCard';
 import { OverallStatusBanner } from '../components/Dashboard/OverallStatusBanner';
 import { ProcessesTable } from '../components/Dashboard/ProcessesTable';
 import { DevicesList } from '../components/Dashboard/DevicesList';
-import { Cpu, MemoryStick, BatteryCharging, HardDrive, RefreshCw, Crosshair } from 'lucide-react';
+import { MissionCenterHeader } from '../components/Dashboard/MissionCenterHeader';
+import { Cpu, MemoryStick, BatteryCharging, HardDrive, RefreshCw } from 'lucide-react';
 
 export const Dashboard: React.FC = () => {
+  const [systemState, setSystemState] = useState<SystemState | null>(null);
   const [processes, setProcesses] = useState<Process[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [events, setEvents] = useState<SystemEvent[]>([]);
@@ -15,14 +26,33 @@ export const Dashboard: React.FC = () => {
   const [resources, setResources] = useState<SystemResources>({
     total_memory_mb: 1024,
     total_storage_gb: 64,
-    used_storage_gb: 22.4
+    used_storage_gb: 22.4,
   });
 
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [realtimeConnected, setRealtimeConnected] = useState<boolean>(false);
 
-  // 1. Cargar procesos
+  // 1. Cargar estado del sistema (system_state)
+  const fetchSystemState = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('system_state')
+        .select('*')
+        .eq('id', 1)
+        .maybeSingle();
+
+      if (error) {
+        console.error('[SkyOS Dashboard] Error cargando system_state:', error.message);
+      } else if (data) {
+        setSystemState(data as SystemState);
+      }
+    } catch (err) {
+      console.error('[SkyOS Dashboard] Error inesperado en system_state:', err);
+    }
+  }, []);
+
+  // 2. Cargar procesos
   const fetchProcesses = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -40,7 +70,7 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
-  // 2. Cargar dispositivos
+  // 3. Cargar dispositivos
   const fetchDevices = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -58,7 +88,7 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
-  // 3. Cargar eventos
+  // 4. Cargar eventos
   const fetchEvents = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -76,7 +106,7 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
-  // 4. Cargar system_settings (key: 'resources')
+  // 5. Cargar system_settings (key: 'resources')
   const fetchResourcesSettings = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -95,7 +125,7 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
-  // 5. Cargar memory_blocks (Regla 7)
+  // 6. Cargar memory_blocks (Regla 7)
   const fetchMemoryBlocks = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -115,13 +145,21 @@ export const Dashboard: React.FC = () => {
   // Carga conjunta inicial
   const loadAllData = useCallback(async () => {
     await Promise.all([
+      fetchSystemState(),
       fetchProcesses(),
       fetchDevices(),
       fetchEvents(),
       fetchResourcesSettings(),
-      fetchMemoryBlocks()
+      fetchMemoryBlocks(),
     ]);
-  }, [fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings, fetchMemoryBlocks]);
+  }, [
+    fetchSystemState,
+    fetchProcesses,
+    fetchDevices,
+    fetchEvents,
+    fetchResourcesSettings,
+    fetchMemoryBlocks,
+  ]);
 
   const handleManualRefresh = async () => {
     setRefreshing(true);
@@ -129,7 +167,7 @@ export const Dashboard: React.FC = () => {
     setRefreshing(false);
   };
 
-  // Efecto principal: carga inicial y suscripción a Supabase Realtime
+  // Efecto principal: carga inicial y suscripción a Supabase Realtime y KernelEngine
   useEffect(() => {
     let isMounted = true;
 
@@ -141,43 +179,49 @@ export const Dashboard: React.FC = () => {
 
     init();
 
-    // 5. Suscripción a Supabase Realtime en processes, devices y events
+    // Sincronización instantánea con ticks locales del motor
+    const unsubscribeEngine = kernelEngine.subscribe(() => {
+      if (isMounted) {
+        fetchSystemState();
+        fetchProcesses();
+      }
+    });
+
+    // Suscripción a Supabase Realtime
     const channel = supabase
       .channel('skyos-dashboard-realtime')
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'processes' },
-        () => {
-          fetchProcesses();
+        { event: '*', schema: 'public', table: 'system_state' },
+        (payload) => {
+          if (payload.new) setSystemState(payload.new as SystemState);
+          else fetchSystemState();
         }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'processes' },
+        () => fetchProcesses()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'devices' },
-        () => {
-          fetchDevices();
-        }
+        () => fetchDevices()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'events' },
-        () => {
-          fetchEvents();
-        }
+        () => fetchEvents()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'system_settings' },
-        () => {
-          fetchResourcesSettings();
-        }
+        () => fetchResourcesSettings()
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'memory_blocks' },
-        () => {
-          fetchMemoryBlocks();
-        }
+        () => fetchMemoryBlocks()
       )
       .subscribe((status) => {
         if (!isMounted) return;
@@ -190,9 +234,18 @@ export const Dashboard: React.FC = () => {
 
     return () => {
       isMounted = false;
+      unsubscribeEngine();
       supabase.removeChannel(channel);
     };
-  }, [loadAllData, fetchProcesses, fetchDevices, fetchEvents, fetchResourcesSettings, fetchMemoryBlocks]);
+  }, [
+    loadAllData,
+    fetchSystemState,
+    fetchProcesses,
+    fetchDevices,
+    fetchEvents,
+    fetchResourcesSettings,
+    fetchMemoryBlocks,
+  ]);
 
   // ==========================================
   // CÁLCULOS DE LAS 4 TARJETAS CON PROGRESO
@@ -203,8 +256,7 @@ export const Dashboard: React.FC = () => {
   const cpuRunningTotal = runningProcesses.reduce((sum, p) => sum + Number(p.cpu_usage_pct || 0), 0);
   const cpuPercentage = Math.min(100, Math.max(0, cpuRunningTotal));
 
-  // 2. Memoria: SUMA de size_mb de memory_blocks (en vez de sumar memory_usage_mb de los procesos),
-  // dividida entre total_memory_mb (system_settings -> resources) [Regla 7]
+  // 2. Memoria: SUMA de size_mb de memory_blocks dividida entre total_memory_mb
   const usedMemoryMb = memoryBlocks.reduce((sum, b) => sum + Number(b.size_mb || 0), 0);
   const totalMemoryMb = resources.total_memory_mb || 1024;
   const memoryPercentage = totalMemoryMb > 0 ? (usedMemoryMb / totalMemoryMb) * 100 : 0;
@@ -215,7 +267,7 @@ export const Dashboard: React.FC = () => {
   const batteryVoltage = batteryDevice?.telemetry_data?.voltage;
   const batteryTemp = batteryDevice?.telemetry_data?.temp_c;
 
-  // 4. Almacenamiento: used_storage_gb / total_storage_gb (system_settings)
+  // 4. Almacenamiento: used_storage_gb / total_storage_gb
   const usedStorageGb = Number(resources.used_storage_gb || 0);
   const totalStorageGb = Number(resources.total_storage_gb || 64);
   const storagePercentage = totalStorageGb > 0 ? (usedStorageGb / totalStorageGb) * 100 : 0;
@@ -223,7 +275,6 @@ export const Dashboard: React.FC = () => {
   // ==========================================
   // CÁLCULO DEL "ESTADO GENERAL"
   // ==========================================
-  // NORMAL, ALERTA o CRÍTICO según dispositivos con problemas o eventos CRITICAL sin reconocer.
   const hasCriticalDevice = devices.some((d) => d.status === 'ERROR' || d.status === 'OFFLINE');
   const hasUnackCriticalEvent = events.some(
     (e) => !e.acknowledged && (e.severity === 'CRITICAL' || e.severity === 'EMERGENCY')
@@ -240,54 +291,66 @@ export const Dashboard: React.FC = () => {
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '1.5rem',
-      maxWidth: '1360px',
-      margin: '0 auto',
-      width: '100%',
-      flex: 1
-    }}>
-      {/* Top Breadcrumb & Actions Bar */}
-      <div style={{
+    <div
+      style={{
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        flexWrap: 'wrap',
-        gap: '0.75rem',
-        paddingBottom: '0.5rem',
-        borderBottom: '1px solid rgba(56, 189, 248, 0.15)'
-      }}>
+        flexDirection: 'column',
+        gap: '1.25rem',
+        maxWidth: '1380px',
+        margin: '0 auto',
+        width: '100%',
+        flex: 1,
+      }}
+    >
+      {/* =====================================================================
+          1. ENCABEZADO "CENTRO DE MISIÓN" (Regla 3: Saludo, Frase de estado y 4 Acciones Rápidas)
+          ===================================================================== */}
+      <MissionCenterHeader
+        systemState={systemState}
+        processes={processes}
+        onRefresh={loadAllData}
+      />
+
+      {/* Barra de Acciones y Sincronización Manual */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+          paddingBottom: '0.4rem',
+          borderBottom: '1px solid rgba(56, 189, 248, 0.15)',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
-          <Crosshair size={18} style={{ color: 'var(--cyan-primary)' }} />
-          <h1 style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: '1.4rem',
-            fontWeight: 700,
-            letterSpacing: '0.08em',
-            margin: 0,
-            color: '#ffffff'
-          }}>
-            DASHBOARD DE OPERACIONES // CENTRO DE CONTROL SKYOS
-          </h1>
+          <h3
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: '1.2rem',
+              fontWeight: 700,
+              letterSpacing: '0.06em',
+              margin: 0,
+              color: '#ffffff',
+            }}
+          >
+            PANEL DE TELEMETRÍA GLOBAL // SUBSISTEMAS DE A BORDO
+          </h3>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <button
-            onClick={handleManualRefresh}
-            disabled={refreshing || loading}
-            className="btn-tactical"
-            style={{ padding: '0.4rem 0.85rem', fontSize: '0.75rem' }}
-            title="Sincronizar datos con Supabase"
-          >
-            <RefreshCw size={14} className={refreshing ? 'pulse-dot' : ''} />
-            <span>SINCRONIZAR</span>
-          </button>
-        </div>
+        <button
+          onClick={handleManualRefresh}
+          disabled={refreshing || loading}
+          className="btn-tactical"
+          style={{ padding: '0.38rem 0.85rem', fontSize: '0.75rem' }}
+          title="Sincronizar telemetría completa con Supabase"
+        >
+          <RefreshCw size={13} className={refreshing ? 'pulse-dot' : ''} />
+          <span>SINCRONIZAR DATOS</span>
+        </button>
       </div>
 
-      {/* 4. Indicador de Estado General */}
+      {/* 2. Indicador de Estado General */}
       <OverallStatusBanner
         status={overallStatus}
         devices={devices}
@@ -295,13 +358,15 @@ export const Dashboard: React.FC = () => {
         realtimeConnected={realtimeConnected}
       />
 
-      {/* 1. Cuatro tarjetas con barra de progreso */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-        gap: '1rem',
-        width: '100%'
-      }}>
+      {/* 3. Cuatro Tarjetas con Barras de Progreso Suaves y Animación */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+          gap: '1rem',
+          width: '100%',
+        }}
+      >
         {/* CPU */}
         <MetricCard
           title="Uso de CPU (Running)"
@@ -310,7 +375,8 @@ export const Dashboard: React.FC = () => {
           subtitle={`${runningProcesses.length} procesos activos ejecutándose`}
           icon={Cpu}
           colorScheme={cpuPercentage > 75 ? 'crimson' : cpuPercentage > 45 ? 'amber' : 'cyan'}
-          auxInfo="TOTAL SUMA RUNNING"
+          auxInfo="SUMA RUNNING"
+          loading={loading}
         />
 
         {/* Memoria */}
@@ -318,10 +384,11 @@ export const Dashboard: React.FC = () => {
           title="Memoria RAM Asignada"
           value={`${usedMemoryMb} MB`}
           percentage={memoryPercentage}
-          subtitle={`Límite: ${totalMemoryMb} MB (${memoryBlocks.length} bloques en memory_blocks)`}
+          subtitle={`Límite: ${totalMemoryMb} MB (${memoryBlocks.length} bloques contiguos)`}
           icon={MemoryStick}
           colorScheme={memoryPercentage > 80 ? 'crimson' : memoryPercentage > 60 ? 'amber' : 'emerald'}
-          auxInfo="FIRST-FIT CONTIGUO"
+          auxInfo="FIRST-FIT VFS"
+          loading={loading}
         />
 
         {/* Batería */}
@@ -333,6 +400,7 @@ export const Dashboard: React.FC = () => {
           icon={BatteryCharging}
           colorScheme={batteryPercentage < 20 ? 'crimson' : batteryPercentage < 50 ? 'amber' : 'emerald'}
           auxInfo={batteryDevice?.status || 'ONLINE'}
+          loading={loading}
         />
 
         {/* Almacenamiento */}
@@ -343,21 +411,21 @@ export const Dashboard: React.FC = () => {
           subtitle={`Capacidad total: ${totalStorageGb} GB (NVMe SSD)`}
           icon={HardDrive}
           colorScheme={storagePercentage > 85 ? 'crimson' : 'cyan'}
-          auxInfo="SYSTEM_SETTINGS"
+          auxInfo="SISTEMA DE ARCHIVOS"
+          loading={loading}
         />
       </div>
 
-      {/* Grid de 2 columnas: 2. Lista de procesos + 3. Lista de dispositivos con semáforo */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(480px, 1fr))',
-        gap: '1.25rem',
-        alignItems: 'stretch'
-      }}>
-        {/* 2. Lista de procesos */}
+      {/* 4. Grid de 2 Columnas: Tabla de Procesos PCB + Matriz de Dispositivos */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(460px, 1fr))',
+          gap: '1.25rem',
+          alignItems: 'stretch',
+        }}
+      >
         <ProcessesTable processes={processes} loading={loading} />
-
-        {/* 3. Lista de dispositivos con semáforo */}
         <DevicesList devices={devices} loading={loading} />
       </div>
     </div>

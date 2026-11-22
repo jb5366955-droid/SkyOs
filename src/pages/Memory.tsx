@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import type { Process, MemoryBlock, SystemResources } from '../types/skyos.types';
 import { computeFreeGaps } from '../kernel/engine';
+import { TechnicalTooltip } from '../components/Common/TechnicalTooltip';
 import {
   MemoryStick,
   Minimize2,
@@ -819,7 +820,9 @@ export const Memory: React.FC = () => {
                 letterSpacing: '0.08em',
               }}
             >
-              FRAGMENTACIÓN
+              <TechnicalTooltip termKey="fragmentacion">
+                FRAGMENTACIÓN
+              </TechnicalTooltip>
             </span>
             <AlertTriangle
               size={15}

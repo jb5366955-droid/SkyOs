@@ -11,6 +11,7 @@ import { Memory } from './pages/Memory';
 import { DigitalTwin } from './pages/DigitalTwin';
 import { Faults } from './pages/Faults';
 import { Benchmark } from './pages/Benchmark';
+import { MissionPlanner } from './pages/MissionPlanner';
 
 export const App: React.FC = () => {
   return (
@@ -31,6 +32,7 @@ export const App: React.FC = () => {
               <Route path="/gemelo" element={<DigitalTwin />} />
               <Route path="/fallos" element={<Faults />} />
               <Route path="/benchmark" element={<Benchmark />} />
+              <Route path="/ruta" element={<MissionPlanner />} />
             </Route>
           </Route>
 
