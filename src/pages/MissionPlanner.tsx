@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import type { RouteWaypoint, MissionRoute, WaypointAction, Device, FlightModelConfig } from '../types/skyos.types';
@@ -23,7 +24,7 @@ import {
   Radio,
   Sliders,
   X,
-  Gauge,
+  Power,
 } from 'lucide-react';
 
 // Coordenadas fijas de la Base (Hangar)
@@ -105,7 +106,112 @@ function segmentCrossesExclusionZone(
   return false;
 }
 
-export const MissionPlanner: React.FC = () => {
+// ==========================================
+// ERROR BOUNDARY PARA /ruta
+// ==========================================
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class MissionPlannerErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('[SkyOS MissionPlanner ErrorBoundary] Error capturado:', error, errorInfo);
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          style={{
+            maxWidth: '650px',
+            margin: '3rem auto',
+            padding: '2rem',
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            border: '1px solid var(--crimson-crit)',
+            borderRadius: '4px',
+            boxShadow: '0 0 30px rgba(255, 51, 102, 0.35)',
+            textAlign: 'center',
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '1rem' }}>
+            <ShieldAlert size={48} color="var(--crimson-crit)" />
+          </div>
+          <h2
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: '1.4rem',
+              color: '#ffffff',
+              marginBottom: '0.75rem',
+            }}
+          >
+            Algo salió mal en el planificador
+          </h2>
+          <p
+            style={{
+              fontSize: '0.85rem',
+              color: '#fca5a5',
+              backgroundColor: 'rgba(239, 68, 68, 0.1)',
+              padding: '0.75rem 1rem',
+              borderRadius: '4px',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              marginBottom: '1.5rem',
+              wordBreak: 'break-word',
+              textAlign: 'left',
+            }}
+          >
+            {this.state.error?.message || 'Error inesperado durante la ejecución del planificador de misión.'}
+          </p>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+            <button
+              onClick={this.handleRetry}
+              className="btn-tactical btn-primary"
+              style={{ padding: '0.55rem 1.25rem', fontSize: '0.85rem' }}
+            >
+              Reintentar
+            </button>
+            <Link
+              to="/"
+              className="btn-tactical"
+              style={{
+                padding: '0.55rem 1.25rem',
+                fontSize: '0.85rem',
+                textDecoration: 'none',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+                color: '#ffffff',
+              }}
+            >
+              Ir al Dashboard
+            </Link>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const MissionPlannerContent: React.FC = () => {
   const { role, user } = useAuth();
   const isAdmin = role === 'ADMIN';
   const canEditAndLaunch = role === 'ADMIN' || role === 'USER';
@@ -137,6 +243,7 @@ export const MissionPlanner: React.FC = () => {
   // Rutas guardadas
   const [savedRoutes, setSavedRoutes] = useState<MissionRoute[]>([]);
   const [loadingRoutes, setLoadingRoutes] = useState<boolean>(false);
+  const inactiveRoutesCount = useMemo(() => savedRoutes.filter((r) => !r.is_active).length, [savedRoutes]);
 
   // Estado del Kernel y Batería
   const [kernelStatus, setKernelStatus] = useState<string>('OFF');
@@ -154,6 +261,10 @@ export const MissionPlanner: React.FC = () => {
   const [editMaxTicks, setEditMaxTicks] = useState<string>('300');
   const [isSavingModel, setIsSavingModel] = useState<boolean>(false);
   const [editModelError, setEditModelError] = useState<string | null>(null);
+
+  // Modales de Confirmación de Borrado de Rutas
+  const [routeToDelete, setRouteToDelete] = useState<MissionRoute | null>(null);
+  const [showDeleteAllInactiveModal, setShowDeleteAllInactiveModal] = useState<boolean>(false);
 
   // Notificaciones y RLS
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -379,6 +490,35 @@ export const MissionPlanner: React.FC = () => {
   };
 
   // ==========================================
+  // MODELO DE VUELO SEGURO (FALLBACKS: 0.2, 10, 300)
+  // ==========================================
+  const safeFlightModel = useMemo<FlightModelConfig>(() => {
+    const bpt =
+      typeof flightModel?.battery_per_tick === 'number' &&
+      !isNaN(flightModel.battery_per_tick) &&
+      flightModel.battery_per_tick > 0
+        ? flightModel.battery_per_tick
+        : 0.2;
+    const smpt =
+      typeof flightModel?.speed_m_per_tick === 'number' &&
+      !isNaN(flightModel.speed_m_per_tick) &&
+      flightModel.speed_m_per_tick > 0
+        ? flightModel.speed_m_per_tick
+        : 10;
+    const mtw =
+      typeof flightModel?.max_ticks_warning === 'number' &&
+      !isNaN(flightModel.max_ticks_warning) &&
+      flightModel.max_ticks_warning > 0
+        ? flightModel.max_ticks_warning
+        : 300;
+    return {
+      battery_per_tick: bpt,
+      speed_m_per_tick: smpt,
+      max_ticks_warning: mtw,
+    };
+  }, [flightModel]);
+
+  // ==========================================
   // CÁLCULOS EN VIVO DE RUTA
   // ==========================================
   // Puntos completos de la ruta: Base -> Waypoints -> Base
@@ -415,8 +555,9 @@ export const MissionPlanner: React.FC = () => {
 
   // Ticks de vuelo: ceil(distancia / speed_m_per_tick)
   const flightTicks = useMemo(() => {
-    return Math.ceil(distance_m / Math.max(0.1, flightModel.speed_m_per_tick));
-  }, [distance_m, flightModel.speed_m_per_tick]);
+    if (waypoints.length === 0) return 0;
+    return Math.ceil(distance_m / Math.max(0.1, safeFlightModel.speed_m_per_tick));
+  }, [distance_m, safeFlightModel.speed_m_per_tick, waypoints.length]);
 
   // Ticks de permanencia en waypoints
   const sumDwellTicks = useMemo(() => {
@@ -432,22 +573,23 @@ export const MissionPlanner: React.FC = () => {
   // Consumo base de vuelo = battery_per_tick por tick.
   // Los demás coeficientes se escalan proporcionalmente respecto al valor anterior de 0.4.
   const est_battery_pct = useMemo(() => {
-    const scale = flightModel.battery_per_tick / 0.4;
-    const baseFlight = flightTicks * flightModel.battery_per_tick;
+    if (waypoints.length === 0) return 0;
+    const scale = safeFlightModel.battery_per_tick / 0.4;
+    const baseFlight = flightTicks * safeFlightModel.battery_per_tick;
     const dwellFlight = sumDwellTicks * (0.4 * scale);
     return Number((baseFlight + dwellFlight).toFixed(1));
-  }, [flightTicks, sumDwellTicks, flightModel.battery_per_tick]);
+  }, [flightTicks, sumDwellTicks, safeFlightModel.battery_per_tick, waypoints.length]);
 
   // Alcance máximo con la batería actual: N ticks (M m)
   const maxTicksCurrentBattery = useMemo(() => {
-    return flightModel.battery_per_tick > 0
-      ? Math.floor(batteryPercentage / flightModel.battery_per_tick)
+    return safeFlightModel.battery_per_tick > 0
+      ? Math.floor(batteryPercentage / safeFlightModel.battery_per_tick)
       : 0;
-  }, [batteryPercentage, flightModel.battery_per_tick]);
+  }, [batteryPercentage, safeFlightModel.battery_per_tick]);
 
   const maxDistanceCurrentBattery = useMemo(() => {
-    return maxTicksCurrentBattery * flightModel.speed_m_per_tick;
-  }, [maxTicksCurrentBattery, flightModel.speed_m_per_tick]);
+    return maxTicksCurrentBattery * safeFlightModel.speed_m_per_tick;
+  }, [maxTicksCurrentBattery, safeFlightModel.speed_m_per_tick]);
 
   // Reserva de seguridad de batería (failsafe 15%)
   const availableBatteryRes = Math.max(0, batteryPercentage - 15);
@@ -479,11 +621,11 @@ export const MissionPlanner: React.FC = () => {
   // Lista de avisos (Amarillo): usa max_ticks_warning en lugar de 60
   const warnings: string[] = useMemo(() => {
     const warns: string[] = [];
-    if (est_ticks > flightModel.max_ticks_warning) {
-      warns.push(`Misión de larga duración: el tiempo estimado supera los ${flightModel.max_ticks_warning} ticks (${est_ticks} ticks).`);
+    if (est_ticks > safeFlightModel.max_ticks_warning) {
+      warns.push(`Misión de larga duración: el tiempo estimado supera los ${safeFlightModel.max_ticks_warning} ticks (${est_ticks} ticks).`);
     }
     return warns;
-  }, [est_ticks, flightModel.max_ticks_warning]);
+  }, [est_ticks, safeFlightModel.max_ticks_warning]);
 
   const isValidRoute = blockingErrors.length === 0;
 
@@ -603,37 +745,45 @@ export const MissionPlanner: React.FC = () => {
   // SIMULACIÓN DE VUELO EN CLIENTE
   // ==========================================
   useEffect(() => {
-    if (!simPlaying || fullRoutePoints.length < 2) {
-      if (simAnimRef.current) cancelAnimationFrame(simAnimRef.current);
+    if (!simPlaying || waypoints.length === 0 || fullRoutePoints.length < 2) {
+      if (simAnimRef.current) {
+        cancelAnimationFrame(simAnimRef.current);
+        simAnimRef.current = null;
+      }
       return;
     }
 
+    let isCancelled = false;
     let lastTimestamp = performance.now();
 
     const loop = (time: number) => {
-      const delta = (time - lastTimestamp) / 1000;
+      if (isCancelled) return;
+      const delta = Math.min(0.2, (time - lastTimestamp) / 1000);
       lastTimestamp = time;
 
-      // Duración base: cada tick equivale a 1 segundo en velocidad x1
-      const totalSimSeconds = Math.max(3, est_ticks * 0.8);
-      const step = (delta * simSpeed) / totalSimSeconds;
+      // Duración base: cada tick equivale a 0.8 segundos en velocidad x1
+      const totalSimSeconds = Math.max(2, (est_ticks || 1) * 0.8);
+      const step = (delta * (simSpeed || 1)) / totalSimSeconds;
+
+      let finished = false;
 
       setSimProgress((prev) => {
-        const next = prev + step;
+        const currentVal = isNaN(prev) ? 0 : prev;
+        const next = currentVal + (isNaN(step) ? 0.01 : step);
         if (next >= 1) {
-          setSimPlaying(false);
+          finished = true;
           setSimDronePos({ x: BASE_POINT.x, y: BASE_POINT.y, angle: 0 });
           return 0;
         }
 
         // Calcular posición actual a lo largo de los tramos
-        const totalSegs = fullRoutePoints.length - 1;
-        const currentSegmentFloat = next * totalSegs;
+        const totalSegs = Math.max(1, fullRoutePoints.length - 1);
+        const currentSegmentFloat = Math.max(0, Math.min(totalSegs, next * totalSegs));
         const segIdx = Math.min(totalSegs - 1, Math.floor(currentSegmentFloat));
-        const segProgress = currentSegmentFloat - segIdx;
+        const segProgress = Math.max(0, Math.min(1, currentSegmentFloat - segIdx));
 
-        const pA = fullRoutePoints[segIdx];
-        const pB = fullRoutePoints[segIdx + 1];
+        const pA = fullRoutePoints[segIdx] || BASE_POINT;
+        const pB = fullRoutePoints[segIdx + 1] || pA;
 
         const curX = pA.x + (pB.x - pA.x) * segProgress;
         const curY = pA.y + (pB.y - pA.y) * segProgress;
@@ -643,26 +793,46 @@ export const MissionPlanner: React.FC = () => {
         const angleRad = Math.atan2(dy, dx);
         const angleDeg = (angleRad * 180) / Math.PI + 90; // +90 para alinear cabeza del dron
 
-        setSimDronePos({ x: curX, y: curY, angle: angleDeg });
+        setSimDronePos({
+          x: isNaN(curX) ? BASE_POINT.x : curX,
+          y: isNaN(curY) ? BASE_POINT.y : curY,
+          angle: isNaN(angleDeg) ? 0 : angleDeg,
+        });
         return next;
       });
 
-      simAnimRef.current = requestAnimationFrame(loop);
+      if (finished) {
+        setSimPlaying(false);
+        if (simAnimRef.current) {
+          cancelAnimationFrame(simAnimRef.current);
+          simAnimRef.current = null;
+        }
+      } else if (!isCancelled) {
+        simAnimRef.current = requestAnimationFrame(loop);
+      }
     };
 
     simAnimRef.current = requestAnimationFrame(loop);
 
     return () => {
-      if (simAnimRef.current) cancelAnimationFrame(simAnimRef.current);
+      isCancelled = true;
+      if (simAnimRef.current) {
+        cancelAnimationFrame(simAnimRef.current);
+        simAnimRef.current = null;
+      }
     };
-  }, [simPlaying, simSpeed, fullRoutePoints, est_ticks]);
+  }, [simPlaying, simSpeed, fullRoutePoints, est_ticks, waypoints.length]);
 
   const handleToggleSim = () => {
-    if (waypoints.length === 0) return;
+    if (!waypoints || waypoints.length === 0) return;
     setSimPlaying((p) => !p);
   };
 
   const handleResetSim = () => {
+    if (simAnimRef.current) {
+      cancelAnimationFrame(simAnimRef.current);
+      simAnimRef.current = null;
+    }
     setSimPlaying(false);
     setSimProgress(0);
     setSimDronePos({ x: BASE_POINT.x, y: BASE_POINT.y, angle: 0 });
@@ -831,14 +1001,68 @@ export const MissionPlanner: React.FC = () => {
     setSuccessMessage(`Ruta "${r.name}" duplicada como nuevo borrador.`);
   };
 
-  // Eliminar ruta guardada
-  const handleDeleteSavedRoute = async (r: MissionRoute) => {
-    if (r.is_active) {
-      setErrorMessage('No se puede eliminar la ruta actualmente ACTIVA.');
+  // Permiso para gestionar rutas: ADMIN en todas; USER solo en sus propias rutas; GUEST ninguna
+  const canManageRoute = useCallback(
+    (r: MissionRoute): boolean => {
+      if (isAdmin) return true;
+      if (role === 'USER' && r.created_by === user?.id) return true;
+      return false;
+    },
+    [isAdmin, role, user?.id]
+  );
+
+  // Desactivar ruta activa (is_active = false)
+  const handleDeactivateRoute = async (r: MissionRoute) => {
+    if (!canManageRoute(r)) {
+      setErrorMessage('ACCESO DENEGADO: no tienes permisos para desactivar esta ruta.');
       return;
     }
 
-    if (!window.confirm(`¿Confirmas la eliminación de la ruta "${r.name}"?`)) {
+    setIsProcessing(true);
+    setErrorMessage(null);
+
+    try {
+      const { data, error } = await supabase
+        .from('routes')
+        .update({ is_active: false })
+        .eq('id', r.id)
+        .select();
+
+      if (error) {
+        console.error('[SkyOS MissionPlanner] Error desactivando ruta:', error);
+        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        setErrorMessage('ACCESO DENEGADO: 0 filas modificadas al desactivar la ruta.');
+        return;
+      }
+
+      setSuccessMessage(`Ruta «${r.name}» desactivada. Ahora puede ser eliminada.`);
+      await fetchSavedRoutes();
+    } catch (err: any) {
+      console.error('[SkyOS MissionPlanner] Excepción desactivando ruta:', err);
+      setErrorMessage(err.message || 'ACCESO DENEGADO');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Confirmar eliminación de una ruta individual
+  const handleConfirmDeleteRoute = async () => {
+    if (!routeToDelete) return;
+    const r = routeToDelete;
+
+    if (!canManageRoute(r)) {
+      setErrorMessage('ACCESO DENEGADO: no tienes permisos para eliminar esta ruta.');
+      setRouteToDelete(null);
+      return;
+    }
+
+    if (r.is_active) {
+      setErrorMessage('No se puede eliminar la ruta actualmente ACTIVA. Desactívala primero.');
+      setRouteToDelete(null);
       return;
     }
 
@@ -852,19 +1076,81 @@ export const MissionPlanner: React.FC = () => {
         .eq('id', r.id)
         .select();
 
-      if (error || !data || data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO');
+      if (error) {
+        console.error('[SkyOS MissionPlanner] Error eliminando ruta:', error);
+        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
         return;
       }
 
-      setSuccessMessage(`Ruta "${r.name}" eliminada.`);
-      if (savedRouteId === r.id) {
-        setSavedRouteId(null);
+      if (!data || data.length === 0) {
+        setErrorMessage('ACCESO DENEGADO: 0 filas afectadas al eliminar la ruta.');
+        return;
       }
+
+      setSuccessMessage(`Ruta «${r.name}» eliminada correctamente.`);
+
+      // Si la ruta borrada estaba cargada en el mapa, límpialo
+      if (savedRouteId === r.id) {
+        handleClear();
+        setSavedRouteId(null);
+        setRouteName('Misión de Reconocimiento Alfa');
+        setRouteDesc('');
+      }
+
+      setRouteToDelete(null);
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Error eliminando ruta:', err);
-      setErrorMessage('ACCESO DENEGADO');
+      console.error('[SkyOS MissionPlanner] Excepción eliminando ruta:', err);
+      setErrorMessage(err.message || 'ACCESO DENEGADO');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Confirmar eliminación de todas las rutas inactivas (SOLO ADMIN)
+  const handleConfirmDeleteAllInactive = async () => {
+    if (!isAdmin) {
+      setErrorMessage('ACCESO DENEGADO: solo ADMIN puede eliminar todas las rutas inactivas.');
+      setShowDeleteAllInactiveModal(false);
+      return;
+    }
+
+    setIsProcessing(true);
+    setErrorMessage(null);
+
+    try {
+      const { data, error } = await supabase
+        .from('routes')
+        .delete()
+        .eq('is_active', false)
+        .select();
+
+      if (error) {
+        console.error('[SkyOS MissionPlanner] Error eliminando rutas inactivas:', error);
+        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        setErrorMessage('ACCESO DENEGADO: 0 filas afectadas al eliminar rutas inactivas.');
+        return;
+      }
+
+      setSuccessMessage(`${data.length} ruta(s) inactiva(s) eliminada(s) correctamente.`);
+
+      // Si la ruta borrada estaba cargada en el mapa, límpialo
+      if (savedRouteId && data.some((item: any) => item.id === savedRouteId)) {
+        handleClear();
+        setSavedRouteId(null);
+        setRouteName('Misión de Reconocimiento Alfa');
+        setRouteDesc('');
+      }
+
+      setShowDeleteAllInactiveModal(false);
+      await fetchSavedRoutes();
+    } catch (err: any) {
+      console.error('[SkyOS MissionPlanner] Excepción eliminando rutas inactivas:', err);
+      setErrorMessage(err.message || 'ACCESO DENEGADO');
     } finally {
       setIsProcessing(false);
     }
@@ -1708,14 +1994,17 @@ export const MissionPlanner: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <button
                 onClick={handleToggleSim}
-                disabled={waypoints.length === 0}
+                disabled={!waypoints || waypoints.length === 0}
                 className="btn-tactical"
                 style={{
                   padding: '0.35rem 0.85rem',
                   fontSize: '0.75rem',
                   backgroundColor: simPlaying ? 'rgba(255, 183, 3, 0.2)' : 'rgba(0, 229, 255, 0.15)',
                   borderColor: simPlaying ? 'var(--amber-warn)' : 'var(--cyan-primary)',
+                  cursor: (!waypoints || waypoints.length === 0) ? 'not-allowed' : 'pointer',
+                  opacity: (!waypoints || waypoints.length === 0) ? 0.5 : 1,
                 }}
+                title={(!waypoints || waypoints.length === 0) ? 'Se requiere al menos 1 waypoint para simular el vuelo' : 'Iniciar/pausar simulación'}
               >
                 {simPlaying ? <Pause size={13} /> : <Play size={13} />}
                 <span>{simPlaying ? 'PAUSAR' : 'SIMULAR VUELO'}</span>
@@ -2020,11 +2309,32 @@ export const MissionPlanner: React.FC = () => {
             marginBottom: '1rem',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <Layers size={16} color="var(--cyan-primary)" />
-            <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', margin: 0, color: '#ffffff' }}>
-              RUTAS GUARDADAS EN BASE DE DATOS (ROUTES)
-            </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Layers size={16} color="var(--cyan-primary)" />
+              <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', margin: 0, color: '#ffffff' }}>
+                RUTAS GUARDADAS EN BASE DE DATOS (ROUTES)
+              </h2>
+            </div>
+            {isAdmin && inactiveRoutesCount > 0 && (
+              <button
+                onClick={() => setShowDeleteAllInactiveModal(true)}
+                disabled={isProcessing}
+                className="btn-action btn-action-delete"
+                style={{
+                  padding: '0.28rem 0.65rem',
+                  fontSize: '0.72rem',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
+                }}
+                title="Eliminar todas las rutas que no se encuentren activas en el sistema"
+                id="btn-delete-all-inactive"
+              >
+                <Trash2 size={12} />
+                <span>Eliminar todas las inactivas ({inactiveRoutesCount})</span>
+              </button>
+            )}
           </div>
 
           {/* Formulario rápido de guardado */}
@@ -2089,7 +2399,7 @@ export const MissionPlanner: React.FC = () => {
               ) : (
                 savedRoutes.map((r) => {
                   const isCurrentActive = r.is_active;
-                  const canDelete = !r.is_active && (isAdmin || (role === 'USER' && r.created_by === user?.id));
+                  const canManage = canManageRoute(r);
 
                   return (
                     <tr
@@ -2178,17 +2488,37 @@ export const MissionPlanner: React.FC = () => {
                             <span>DUPLICAR</span>
                           </button>
 
-                          {canDelete && (
-                            <button
-                              onClick={() => handleDeleteSavedRoute(r)}
-                              disabled={isProcessing}
-                              className="btn-action btn-action-delete"
-                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem' }}
-                              title="Eliminar ruta de la base de datos"
-                            >
-                              <Trash2 size={12} />
-                              <span>ELIMINAR</span>
-                            </button>
+                          {/* REGLA: Si la ruta está activa -> Desactivar; si está inactiva -> Eliminar */}
+                          {canManage && (
+                            isCurrentActive ? (
+                              <button
+                                onClick={() => handleDeactivateRoute(r)}
+                                disabled={isProcessing}
+                                className="btn-action"
+                                style={{
+                                  padding: '0.25rem 0.55rem',
+                                  fontSize: '0.72rem',
+                                  backgroundColor: 'rgba(255, 183, 3, 0.15)',
+                                  border: '1px solid var(--amber-warn)',
+                                  color: 'var(--amber-warn)',
+                                }}
+                                title="Desactivar ruta activa para permitir su eliminación o cambio"
+                              >
+                                <Power size={12} />
+                                <span>DESACTIVAR</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => setRouteToDelete(r)}
+                                disabled={isProcessing}
+                                className="btn-action btn-action-delete"
+                                style={{ padding: '0.25rem 0.55rem', fontSize: '0.72rem' }}
+                                title="Eliminar ruta de la base de datos"
+                              >
+                                <Trash2 size={12} />
+                                <span>ELIMINAR</span>
+                              </button>
+                            )
                           )}
                         </div>
                       </td>
@@ -2398,6 +2728,168 @@ export const MissionPlanner: React.FC = () => {
           </div>
         </div>
       )}
+      {/* 7. Modal Confirmación Borrado de Ruta Individual */}
+      {routeToDelete && (
+        <div
+          className="hud-modal-overlay"
+          onClick={() => !isProcessing && setRouteToDelete(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10006,
+            backgroundColor: 'rgba(3, 7, 18, 0.82)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+          }}
+        >
+          <div
+            className="hud-modal-box hud-glass-panel"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '460px',
+              width: '100%',
+              padding: '1.4rem',
+              borderRadius: '4px',
+              border: '1px solid var(--crimson-crit)',
+              boxShadow: '0 0 35px rgba(255, 51, 102, 0.25), 0 20px 40px rgba(0, 0, 0, 0.85)',
+              backgroundColor: 'rgba(12, 10, 20, 0.98)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={20} style={{ color: 'var(--crimson-crit)' }} />
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem', margin: 0, color: '#ffffff', letterSpacing: '0.04em' }}>
+                  CONFIRMAR ELIMINACIÓN
+                </h3>
+              </div>
+              <button
+                onClick={() => setRouteToDelete(null)}
+                disabled={isProcessing}
+                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '2px' }}
+                title="Cerrar ventana"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.85rem', color: '#f8fafc', margin: '0 0 1.25rem', fontFamily: 'var(--font-body)', lineHeight: 1.5 }}>
+              ¿Eliminar la ruta «{routeToDelete.name}»? No se puede deshacer.
+            </p>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem' }}>
+              <button
+                type="button"
+                onClick={() => setRouteToDelete(null)}
+                disabled={isProcessing}
+                className="btn-tactical"
+                style={{ fontSize: '0.78rem', padding: '0.4rem 0.9rem' }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteRoute}
+                disabled={isProcessing}
+                className="btn-action btn-action-delete"
+                style={{ fontSize: '0.78rem', padding: '0.4rem 1.1rem' }}
+              >
+                {isProcessing ? 'Eliminando...' : 'Eliminar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8. Modal Confirmación Borrado de Todas las Rutas Inactivas */}
+      {showDeleteAllInactiveModal && (
+        <div
+          className="hud-modal-overlay"
+          onClick={() => !isProcessing && setShowDeleteAllInactiveModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10006,
+            backgroundColor: 'rgba(3, 7, 18, 0.82)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+          }}
+        >
+          <div
+            className="hud-modal-box hud-glass-panel"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '480px',
+              width: '100%',
+              padding: '1.4rem',
+              borderRadius: '4px',
+              border: '1px solid var(--crimson-crit)',
+              boxShadow: '0 0 35px rgba(255, 51, 102, 0.25), 0 20px 40px rgba(0, 0, 0, 0.85)',
+              backgroundColor: 'rgba(12, 10, 20, 0.98)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <ShieldAlert size={20} style={{ color: 'var(--crimson-crit)' }} />
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem', margin: 0, color: '#ffffff', letterSpacing: '0.04em' }}>
+                  ELIMINAR TODAS LAS INACTIVAS
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowDeleteAllInactiveModal(false)}
+                disabled={isProcessing}
+                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '2px' }}
+                title="Cerrar ventana"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.85rem', color: '#f8fafc', margin: '0 0 1.25rem', fontFamily: 'var(--font-body)', lineHeight: 1.5 }}>
+              ¿Eliminar todas las rutas inactivas ({inactiveRoutesCount} ruta{inactiveRoutesCount !== 1 ? 's' : ''})? No se puede deshacer.
+            </p>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.65rem' }}>
+              <button
+                type="button"
+                onClick={() => setShowDeleteAllInactiveModal(false)}
+                disabled={isProcessing}
+                className="btn-tactical"
+                style={{ fontSize: '0.78rem', padding: '0.4rem 0.9rem' }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteAllInactive}
+                disabled={isProcessing}
+                className="btn-action btn-action-delete"
+                style={{ fontSize: '0.78rem', padding: '0.4rem 1.1rem' }}
+              >
+                {isProcessing ? 'Eliminando...' : 'Eliminar todas'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+};
+
+// ==========================================
+// EXPORT CON ERROR BOUNDARY
+// ==========================================
+export const MissionPlanner: React.FC = () => {
+  return (
+    <MissionPlannerErrorBoundary>
+      <MissionPlannerContent />
+    </MissionPlannerErrorBoundary>
   );
 };
