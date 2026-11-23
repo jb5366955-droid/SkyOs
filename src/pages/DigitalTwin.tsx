@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { kernelEngine } from '../kernel/engine';
+import { useAuth } from '../context/AuthContext';
+import { formatSupabaseError } from '../lib/errorUtils';
 import type {
   SystemState,
   Process,
@@ -25,6 +27,7 @@ import {
   MapPin,
   AlertTriangle,
   ExternalLink,
+  Rocket,
 } from 'lucide-react';
 
 // =====================================================================
@@ -92,9 +95,13 @@ export const DigitalTwin: React.FC = () => {
   // Ruta activa de la base de datos (tabla routes)
   const [activeRoute, setActiveRoute] = useState<MissionRoute | null>(null);
 
+  const { role } = useAuth();
+
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'MAP' | 'DRON' | 'DUAL'>('DUAL');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isActionInProgress, setIsActionInProgress] = useState<boolean>(false);
 
   // ==========================================
   // CARGA DE DATOS DESDE SUPABASE
@@ -225,6 +232,79 @@ export const DigitalTwin: React.FC = () => {
   const patrolProgressRaw =
     patrolBurstTotal > 0 ? (patrolBurstTotal - patrolBurstRem) / patrolBurstTotal : 0;
   const patrolProgress = Math.max(0, Math.min(1, patrolProgressRaw));
+
+  // ==========================================
+  // DESPEGUE INMEDIATO (BOOST DE PATRULLA)
+  // ==========================================
+  const canDispatch = role === 'ADMIN' || role === 'USER';
+
+  const isPatrolBoosted = useMemo(() => {
+    return (
+      (patrolProc?.metadata as any)?.boost === true &&
+      patrolProc?.status !== 'TERMINATED'
+    );
+  }, [patrolProc]);
+
+  const patrolProgressPct = useMemo(() => {
+    return Math.round(patrolProgress * 100);
+  }, [patrolProgress]);
+
+  const handleDispatchPatrolNow = async () => {
+    if (!canDispatch) return;
+    setIsActionInProgress(true);
+    setErrorMessage(null);
+    try {
+      const { error: rpcError } = await supabase.rpc('dispatch_patrol_now');
+      if (rpcError) {
+        setErrorMessage(formatSupabaseError(rpcError, 'Error al ejecutar despegue inmediato de patrulla.'));
+        return;
+      }
+      await fetchAllData();
+    } catch (err: any) {
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al despachar patrulla.'));
+    } finally {
+      setIsActionInProgress(false);
+    }
+  };
+
+  const handleReleaseBoost = async () => {
+    if (!canDispatch || !patrolProc) return;
+    setIsActionInProgress(true);
+    setErrorMessage(null);
+    try {
+      const updatedMeta = { ...((patrolProc.metadata as Record<string, any>) || {}) };
+      delete (updatedMeta as any).boost;
+
+      const { error: updateErr } = await supabase
+        .from('processes')
+        .update({ metadata: updatedMeta })
+        .eq('id', 'patrol_manager');
+
+      if (updateErr) {
+        setErrorMessage(formatSupabaseError(updateErr, 'Error al soltar prioridad de patrulla.'));
+        return;
+      }
+
+      const currentTick = systemState?.tick || 0;
+      await supabase.from('events').insert({
+        event_type: 'PATROL_BOOST_RELEASED',
+        severity: 'INFO',
+        description: 'Prioridad de CPU (boost) liberada manualmente por el operador desde el Gemelo Digital.',
+        source_process_id: 'patrol_manager',
+        telemetry_snapshot: {
+          tick: currentTick,
+          process: 'patrol_manager',
+          reason: 'MANUAL_RELEASE',
+        },
+      });
+
+      await fetchAllData();
+    } catch (err: any) {
+      setErrorMessage(formatSupabaseError(err, 'Excepción al soltar prioridad.'));
+    } finally {
+      setIsActionInProgress(false);
+    }
+  };
 
   // ==========================================
   // DETERMINACIÓN DE LA RUTA Y PUNTOS EN VUELO
@@ -581,7 +661,95 @@ export const DigitalTwin: React.FC = () => {
         </div>
 
         {/* Acciones y Selectores de Vista */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+          {/* BOTÓN DESPEGAR AHORA / EN VUELO (Solo ADMIN y USER; GUEST no lo ve) */}
+          {canDispatch && (
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              {isPatrolBoosted ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.65rem',
+                    backgroundColor: 'rgba(0, 229, 255, 0.12)',
+                    border: '1px solid var(--cyan-primary)',
+                    padding: '0.4rem 0.85rem',
+                    borderRadius: '2px',
+                    boxShadow: '0 0 16px var(--cyan-glow)',
+                  }}
+                  id="badge-patrol-en-vuelo"
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                    <span
+                      className="pulse-dot"
+                      style={{
+                        width: '8px',
+                        height: '8px',
+                        backgroundColor: 'var(--cyan-primary)',
+                        borderRadius: '50%',
+                        display: 'inline-block',
+                        boxShadow: '0 0 8px var(--cyan-primary)',
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.8rem',
+                        fontWeight: 700,
+                        color: '#ffffff',
+                        letterSpacing: '0.06em',
+                      }}
+                    >
+                      EN VUELO <span style={{ color: 'var(--cyan-primary)' }}>({patrolProgressPct}%)</span>
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleReleaseBoost}
+                    disabled={isActionInProgress}
+                    className="btn-tactical"
+                    style={{
+                      padding: '0.22rem 0.55rem',
+                      fontSize: '0.68rem',
+                      fontFamily: 'var(--font-mono)',
+                      backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                      borderColor: 'rgba(239, 68, 68, 0.5)',
+                      color: '#f87171',
+                    }}
+                    title="Quitar metadata.boost y retornar al scheduler regular"
+                    id="btn-release-patrol-boost"
+                  >
+                    Soltar prioridad
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleDispatchPatrolNow}
+                  disabled={!isSystemRunning || isActionInProgress}
+                  className="btn-tactical"
+                  style={{
+                    padding: '0.52rem 1.25rem',
+                    fontSize: '0.84rem',
+                    fontWeight: 700,
+                    letterSpacing: '0.08em',
+                    backgroundColor: isSystemRunning ? 'rgba(0, 229, 255, 0.22)' : 'rgba(100, 116, 139, 0.2)',
+                    borderColor: isSystemRunning ? 'var(--cyan-primary)' : 'var(--text-dim)',
+                    color: isSystemRunning ? '#ffffff' : 'var(--text-dim)',
+                    boxShadow: isSystemRunning ? '0 0 18px var(--cyan-glow)' : 'none',
+                    cursor: !isSystemRunning ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.55rem',
+                  }}
+                  title={!isSystemRunning ? 'Enciende el kernel' : 'Despegue inmediato de la patrulla (prioridad manual)'}
+                  id="btn-despegar-ahora"
+                >
+                  <Rocket size={17} className={isActionInProgress ? 'pulse-dot' : ''} />
+                  <span>DESPEGAR AHORA</span>
+                </button>
+              )}
+            </div>
+          )}
+
           <div
             style={{
               display: 'flex',
@@ -653,6 +821,26 @@ export const DigitalTwin: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Aviso de error en Supabase / RPC */}
+      {errorMessage && (
+        <div className="rls-alert-danger" style={{ marginBottom: '0.5rem' }} id="gemelo-alert-danger">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+            <AlertTriangle size={20} color="var(--crimson-crit)" />
+            <div>
+              <div style={{ fontFamily: 'var(--font-display)', fontSize: '0.95rem', fontWeight: 700, color: '#ffffff' }}>
+                {errorMessage}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => setErrorMessage(null)}
+            style={{ background: 'transparent', border: 'none', color: 'var(--crimson-crit)', cursor: 'pointer', fontSize: '1.1rem' }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* =====================================================================
           BANNER DE ESTADO DE LA MISIÓN (Regla 4: Alerta si no hay ruta activa)

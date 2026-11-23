@@ -20,7 +20,9 @@ import {
   Search,
   Shield,
   Radio,
+  Rocket,
 } from 'lucide-react';
+import { formatSupabaseError } from '../lib/errorUtils';
 
 // Procesos que un usuario con rol USER tiene autorización de modificar en RLS
 const USER_ALLOWED_PROCESS_IDS = ['patrol_manager', 'video_recorder', 'vision_detector'];
@@ -185,7 +187,7 @@ export const Processes: React.FC = () => {
           error: error?.message,
           dataLength: data?.length,
         });
-        setErrorMessage('ACCESO DENEGADO: el usuario no tiene permisos suficientes');
+        setErrorMessage(formatSupabaseError(error, 'ACCESO DENEGADO: el usuario no tiene permisos suficientes'));
         return;
       }
 
@@ -211,7 +213,7 @@ export const Processes: React.FC = () => {
       await fetchProcesses();
     } catch (err: any) {
       console.error('[SkyOS Processes] Excepción al actualizar proceso:', err);
-      setErrorMessage('ACCESO DENEGADO: el usuario no tiene permisos suficientes');
+      setErrorMessage(formatSupabaseError(err, 'ACCESO DENEGADO: el usuario no tiene permisos suficientes'));
     } finally {
       setProcessingId(null);
     }
@@ -237,7 +239,7 @@ export const Processes: React.FC = () => {
         .select();
 
       if (error || !data || data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO: el usuario no tiene permisos suficientes');
+        setErrorMessage(formatSupabaseError(error, 'ACCESO DENEGADO: el usuario no tiene permisos suficientes'));
         return;
       }
 
@@ -253,7 +255,7 @@ export const Processes: React.FC = () => {
       await fetchProcesses();
     } catch (err: any) {
       console.error('[SkyOS Processes] Error eliminando proceso:', err);
-      setErrorMessage('ACCESO DENEGADO: el usuario no tiene permisos suficientes');
+      setErrorMessage(formatSupabaseError(err, 'ACCESO DENEGADO: el usuario no tiene permisos suficientes'));
     } finally {
       setProcessingId(null);
     }
@@ -319,7 +321,7 @@ export const Processes: React.FC = () => {
           error: error?.message,
           dataLength: data?.length,
         });
-        setErrorMessage('ACCESO DENEGADO');
+        setErrorMessage(formatSupabaseError(error, 'ACCESO DENEGADO'));
         return;
       }
 
@@ -349,7 +351,32 @@ export const Processes: React.FC = () => {
       await fetchProcesses();
     } catch (err: any) {
       console.error('[SkyOS Processes] Excepción al reiniciar proceso:', err);
-      setErrorMessage('ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'ACCESO DENEGADO'));
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  // ==========================================
+  // DESPEGUE INMEDIATO (RPC dispatch_patrol_now)
+  // ==========================================
+  const handleDispatchPatrolNow = async () => {
+    setProcessingId('patrol_manager');
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    try {
+      const { error } = await supabase.rpc('dispatch_patrol_now');
+
+      if (error) {
+        setErrorMessage(formatSupabaseError(error, 'Error al despachar la patrulla.'));
+        return;
+      }
+
+      setSuccessMessage('¡Despegue inmediato de la patrulla activado con éxito! Proceso patrol_manager en READY con prioridad de CPU concedida.');
+      await fetchProcesses();
+    } catch (err: any) {
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al despachar la patrulla.'));
     } finally {
       setProcessingId(null);
     }
@@ -917,6 +944,27 @@ export const Processes: React.FC = () => {
                         {/* Requisito 6 / Excepción Acción Reiniciar: TERMINATED */}
                         {isTerminated ? (
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            {/* Despegue Inmediato para Patrol Manager (ADMIN o USER; GUEST no lo ve) */}
+                            {proc.id === 'patrol_manager' && (role === 'ADMIN' || role === 'USER') && (
+                              <button
+                                onClick={handleDispatchPatrolNow}
+                                disabled={isBusy}
+                                className="btn-action"
+                                style={{
+                                  borderColor: 'var(--cyan-primary)',
+                                  color: 'var(--cyan-primary)',
+                                  backgroundColor: 'rgba(0, 229, 255, 0.15)',
+                                  boxShadow: (proc.metadata as any)?.boost ? '0 0 10px var(--cyan-glow)' : 'none',
+                                  fontWeight: 600,
+                                }}
+                                title="Despegue inmediato: otorgar prioridad manual de CPU (dispatch_patrol_now)"
+                                id={`btn-dispatch-patrol-${proc.pid}`}
+                              >
+                                <Rocket size={12} className={isBusy ? 'pulse-dot' : ''} />
+                                <span>DESPEGAR AHORA</span>
+                              </button>
+                            )}
+
                             {/* Acción Reiniciar: solo visible si canRestart (ADMIN o USER en sus 3 procesos, y no is_daemon; GUEST no lo ve) */}
                             {canRestart && (
                               <button
@@ -1005,6 +1053,27 @@ export const Processes: React.FC = () => {
                         ) : canUserManage ? (
                           /* Transiciones permitidas para ADMIN o USER (en sus procesos designados) */
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.4rem', flexWrap: 'wrap' }}>
+                            {/* Despegue Inmediato para Patrol Manager (ADMIN o USER; GUEST no lo ve) */}
+                            {proc.id === 'patrol_manager' && (role === 'ADMIN' || role === 'USER') && (
+                              <button
+                                onClick={handleDispatchPatrolNow}
+                                disabled={isBusy}
+                                className="btn-action"
+                                style={{
+                                  borderColor: 'var(--cyan-primary)',
+                                  color: 'var(--cyan-primary)',
+                                  backgroundColor: 'rgba(0, 229, 255, 0.15)',
+                                  boxShadow: (proc.metadata as any)?.boost ? '0 0 10px var(--cyan-glow)' : 'none',
+                                  fontWeight: 600,
+                                }}
+                                title="Despegue inmediato: otorgar prioridad manual de CPU (dispatch_patrol_now)"
+                                id={`btn-dispatch-patrol-${proc.pid}`}
+                              >
+                                <Rocket size={12} className={isBusy ? 'pulse-dot' : ''} />
+                                <span>DESPEGAR AHORA</span>
+                              </button>
+                            )}
+
                             {/* NEW -> READY */}
                             {proc.status === 'NEW' && (
                               <button

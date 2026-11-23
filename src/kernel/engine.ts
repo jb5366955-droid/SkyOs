@@ -554,6 +554,41 @@ export class KernelEngine {
     await faultEngine.detectAndRespondFailsafes(nextTick, processes, currentBlocks, totalMemoryMb);
 
     // =======================================================================
+    // REGLA DESPEGUE: Si un fallo (failsafe) pasa un proceso con boost a
+    // WAITING o TERMINATED, el boost se quita y se registra PATROL_BOOST_RELEASED
+    // =======================================================================
+    for (const proc of processes) {
+      if (
+        (proc.metadata as any)?.boost === true &&
+        (proc.status === 'WAITING' || proc.status === 'TERMINATED')
+      ) {
+        const updatedMeta = { ...((proc.metadata as Record<string, any>) || {}) };
+        delete (updatedMeta as any).boost;
+        proc.metadata = updatedMeta;
+
+        await supabase
+          .from('processes')
+          .update({ metadata: updatedMeta })
+          .eq('id', proc.id);
+
+        await supabase.from('events').insert({
+          event_type: 'PATROL_BOOST_RELEASED',
+          severity: 'INFO',
+          description: `Prioridad de CPU (boost) liberada para "${proc.name}" (PID #${proc.pid}): Transición a ${proc.status} por contingencia / fallo`,
+          source_process_id: proc.id,
+          telemetry_snapshot: {
+            tick: nextTick,
+            process: proc.name,
+            process_id: proc.id,
+            pid: proc.pid,
+            status: proc.status,
+            reason: (proc.metadata as any)?.waiting_reason || 'FAILSAFE',
+          },
+        });
+      }
+    }
+
+    // =======================================================================
     // REGLA 3: EN CADA TICK, ANTES DE PLANIFICAR:
     // =======================================================================
 
@@ -599,6 +634,9 @@ export class KernelEngine {
     );
 
     waitingMemoryProcs.sort((a, b) => {
+      const boostA = (a.metadata as any)?.boost === true ? 1 : 0;
+      const boostB = (b.metadata as any)?.boost === true ? 1 : 0;
+      if (boostA !== boostB) return boostB - boostA; // Procesos con boost primero
       const arrA = a.arrival_tick ?? 0;
       const arrB = b.arrival_tick ?? 0;
       if (arrA !== arrB) return arrA - arrB;
@@ -678,6 +716,9 @@ export class KernelEngine {
     );
 
     readyWithoutBlock.sort((a, b) => {
+      const boostA = (a.metadata as any)?.boost === true ? 1 : 0;
+      const boostB = (b.metadata as any)?.boost === true ? 1 : 0;
+      if (boostA !== boostB) return boostB - boostA; // Procesos con boost primero
       const arrA = a.arrival_tick ?? 0;
       const arrB = b.arrival_tick ?? 0;
       if (arrA !== arrB) return arrA - arrB;
@@ -745,10 +786,14 @@ export class KernelEngine {
         const largest_free_mb =
           gaps.length > 0 ? Math.max(...gaps.map((g) => g.size)) : 0;
 
+        const hadBoost = (proc.metadata as any)?.boost === true;
         const updatedMeta = {
           ...((proc.metadata as Record<string, any>) || {}),
           waiting_reason: 'MEMORY',
         };
+        if (hadBoost) {
+          delete (updatedMeta as any).boost;
+        }
 
         await supabase
           .from('processes')
@@ -760,6 +805,22 @@ export class KernelEngine {
 
         proc.status = 'WAITING';
         proc.metadata = updatedMeta;
+
+        if (hadBoost) {
+          await supabase.from('events').insert({
+            event_type: 'PATROL_BOOST_RELEASED',
+            severity: 'INFO',
+            description: `Prioridad de CPU (boost) liberada para "${proc.name}" (PID #${proc.pid}): Fallo de asignación de memoria (sin hueco contiguo)`,
+            source_process_id: proc.id,
+            telemetry_snapshot: {
+              tick: nextTick,
+              process: proc.name,
+              process_id: proc.id,
+              pid: proc.pid,
+              reason: 'MEMORY_ALLOC_FAILED',
+            },
+          });
+        }
 
         // Registra UNA sola vez el evento MEMORY_ALLOC_FAILED con severity WARNING
         await supabase.from('events').insert({
@@ -815,7 +876,22 @@ export class KernelEngine {
     let chosen: Process | null = null;
 
     if (candidates.length > 0) {
-      if (scheduler === 'FCFS') {
+      // =======================================================================
+      // REGLA 1 DESPEGUE INMEDIATO:
+      // Si hay un proceso de usuario con metadata.boost = true en estado READY
+      // o RUNNING, ese se elige SIEMPRE, antes de aplicar FCFS, Round Robin o
+      // Prioridades (expropiación manual).
+      // =======================================================================
+      const boostedCandidate = candidates.find((p) => (p.metadata as any)?.boost === true);
+
+      if (boostedCandidate) {
+        chosen = boostedCandidate;
+        if (boostedCandidate.id === this.currentProcessId) {
+          this.consecutiveTicksRunning += 1;
+        } else {
+          this.consecutiveTicksRunning = 1;
+        }
+      } else if (scheduler === 'FCFS') {
         // FCFS: se queda el que está en RUNNING hasta que termine; si no hay, el de menor arrival_tick
         const currentRunning = candidates.find((p) => p.status === 'RUNNING');
         if (currentRunning) {
@@ -938,6 +1014,14 @@ export class KernelEngine {
           ? chosen.started_tick
           : nextTick;
 
+      const hadBoost = (chosen.metadata as any)?.boost === true;
+      let chosenMetadata = chosen.metadata;
+      if (isFinished && hadBoost) {
+        chosenMetadata = { ...((chosen.metadata as Record<string, any>) || {}) };
+        delete (chosenMetadata as any).boost;
+        chosen.metadata = chosenMetadata;
+      }
+
       // Actualizar proceso elegido
       await supabase
         .from('processes')
@@ -947,10 +1031,28 @@ export class KernelEngine {
           last_run_tick: nextTick,
           started_tick: started,
           finished_tick: isFinished ? nextTick : null,
+          metadata: chosenMetadata,
         })
         .eq('id', chosen.id);
 
       if (isFinished) {
+        // REGLA 3 DESPEGUE: Si el proceso tenía boost y termina, registra PATROL_BOOST_RELEASED
+        if (hadBoost) {
+          await supabase.from('events').insert({
+            event_type: 'PATROL_BOOST_RELEASED',
+            severity: 'INFO',
+            description: `Prioridad de CPU (boost) liberada para "${chosen.name}" (PID #${chosen.pid}): Proceso finalizado (ronda completada)`,
+            source_process_id: chosen.id,
+            telemetry_snapshot: {
+              tick: nextTick,
+              process: chosen.name,
+              process_id: chosen.id,
+              pid: chosen.pid,
+              reason: 'PROCESS_TERMINATED',
+            },
+          });
+        }
+
         // Regla 4: Cuando un proceso termina solo (burst_remaining=0), libera su bloque en el mismo tick.
         const blockToFree = currentBlocks.find((b) => b.process_id === chosen.id);
         if (blockToFree) {

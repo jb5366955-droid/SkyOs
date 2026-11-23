@@ -15,6 +15,7 @@ import {
   ArrowDown,
   Save,
   Rocket,
+  Zap,
   AlertTriangle,
   ShieldAlert,
   CheckCircle2,
@@ -104,6 +105,46 @@ function segmentCrossesExclusionZone(
   if (lineSegmentsIntersect(x1, y1, x2, y2, minX, maxY, minX, minY)) return true; // Left
 
   return false;
+}
+
+// ==========================================
+// FORMATEO DE ERRORES DE SUPABASE
+// ==========================================
+function formatSupabaseError(error: any, fallbackMessage = 'Error en la operación'): string {
+  console.error('[SkyOS Supabase Error]:', error);
+
+  if (!error) return fallbackMessage;
+
+  const isAccessDenied = String(error.code) === '42501';
+  const parts: string[] = [];
+
+  // 1. Mensaje real (error.message)
+  const messageText = error.message || fallbackMessage;
+  parts.push(messageText);
+
+  // 2. Código (error.code)
+  if (error.code) {
+    parts.push(`[Código: ${error.code}]`);
+  }
+
+  // 3. Detalles (error.details)
+  if (error.details) {
+    parts.push(`Detalles: ${error.details}`);
+  }
+
+  // 4. Pista opcional (error.hint)
+  if (error.hint) {
+    parts.push(`Pista: ${error.hint}`);
+  }
+
+  const baseText = parts.join(' - ');
+
+  // Solo si el código es 42501 antepón "ACCESO DENEGADO: "
+  if (isAccessDenied) {
+    return `ACCESO DENEGADO: ${baseText}`;
+  }
+
+  return baseText;
 }
 
 // ==========================================
@@ -600,8 +641,9 @@ const MissionPlannerContent: React.FC = () => {
     return waypoints.some((wp) => wp.altitude > 120);
   }, [waypoints]);
 
-  // Lista de errores bloqueantes (Rojo)
-  const blockingErrors: string[] = useMemo(() => {
+  // Errores que BLOQUEAN GUARDAR RUTA: 0 waypoints, exclusión o altura > 120 m
+  // NO se bloquea por batería insuficiente ni duración larga.
+  const saveBlockingErrors: string[] = useMemo(() => {
     const errs: string[] = [];
     if (waypoints.length < 1) {
       errs.push('Se requiere al menos 1 waypoint para trazar una ruta.');
@@ -612,11 +654,41 @@ const MissionPlannerContent: React.FC = () => {
     if (hasHeightViolation) {
       errs.push('Altitud no autorizada: ningún waypoint puede superar los 120 m (límite legal UAV).');
     }
+    return errs;
+  }, [waypoints.length, hasExclusionViolation, crossingSegments.length, hasHeightViolation]);
+
+  const canSaveRoute = saveBlockingErrors.length === 0;
+
+  // Cálculo de sugerencia de recorte para cuando la batería no alcanza
+  const batteryTrimSuggestion = useMemo(() => {
+    if (!isBatteryInsufficient) return null;
+    const excessPct = Number((est_battery_pct - availableBatteryRes).toFixed(1));
+    const ticksToTrim =
+      safeFlightModel.battery_per_tick > 0
+        ? Math.ceil(excessPct / safeFlightModel.battery_per_tick)
+        : 0;
+    const metersToTrim = ticksToTrim * safeFlightModel.speed_m_per_tick;
+    return {
+      excessPct,
+      ticksToTrim,
+      metersToTrim,
+    };
+  }, [isBatteryInsufficient, est_battery_pct, availableBatteryRes, safeFlightModel]);
+
+  // Errores que BLOQUEAN LANZAR MISIÓN: errores de guardado + batería insuficiente
+  const launchBlockingErrors: string[] = useMemo(() => {
+    const errs: string[] = [...saveBlockingErrors];
     if (isBatteryInsufficient) {
-      errs.push(`Batería insuficiente: requiere ${est_battery_pct}% y la reserva sobre failsafe es de ${availableBatteryRes.toFixed(1)}% (Batería actual: ${batteryPercentage}%).`);
+      let msg = `Batería insuficiente: requiere ${est_battery_pct}% y la reserva disponible sobre failsafe es de ${availableBatteryRes.toFixed(1)}% (Batería actual: ${batteryPercentage}% menos 15% de reserva de seguridad).`;
+      if (batteryTrimSuggestion) {
+        msg += ` Sugerencia de recorte: reduce la trayectoria en al menos ${batteryTrimSuggestion.ticksToTrim} ticks (~${batteryTrimSuggestion.metersToTrim} m) o elimina tiempos de permanencia para poder despegar.`;
+      }
+      errs.push(msg);
     }
     return errs;
-  }, [waypoints.length, hasExclusionViolation, crossingSegments.length, hasHeightViolation, isBatteryInsufficient, est_battery_pct, availableBatteryRes, batteryPercentage]);
+  }, [saveBlockingErrors, isBatteryInsufficient, est_battery_pct, availableBatteryRes, batteryPercentage, batteryTrimSuggestion]);
+
+  const canLaunchMission = launchBlockingErrors.length === 0;
 
   // Lista de avisos (Amarillo): usa max_ticks_warning en lugar de 60
   const warnings: string[] = useMemo(() => {
@@ -626,8 +698,6 @@ const MissionPlannerContent: React.FC = () => {
     }
     return warns;
   }, [est_ticks, safeFlightModel.max_ticks_warning]);
-
-  const isValidRoute = blockingErrors.length === 0;
 
   // Waypoint seleccionado actualmente
   const selectedWaypoint = useMemo(() => {
@@ -843,12 +913,12 @@ const MissionPlannerContent: React.FC = () => {
   // ==========================================
   const handleSaveRoute = async () => {
     if (!canEditAndLaunch) {
-      setErrorMessage('ACCESO DENEGADO: solo ADMIN y USER pueden guardar rutas.');
+      setErrorMessage('Solo los roles ADMIN y USER tienen permisos para guardar rutas.');
       return;
     }
 
-    if (!isValidRoute) {
-      setErrorMessage('No se puede guardar una ruta con advertencias críticas bloqueantes.');
+    if (!canSaveRoute) {
+      setErrorMessage('No se puede guardar la ruta: corrige las infracciones de waypoints, zona de exclusión o altitud.');
       return;
     }
 
@@ -882,8 +952,13 @@ const MissionPlannerContent: React.FC = () => {
           .select();
       }
 
-      if (res.error || !res.data || res.data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO');
+      if (res.error) {
+        setErrorMessage(formatSupabaseError(res.error, 'Error al guardar la ruta en Supabase.'));
+        return;
+      }
+
+      if (!res.data || res.data.length === 0) {
+        setErrorMessage('No se guardó ninguna fila en la base de datos (0 filas devueltas).');
         return;
       }
 
@@ -892,8 +967,7 @@ const MissionPlannerContent: React.FC = () => {
       setSuccessMessage(`Ruta "${saved.name}" guardada con éxito en la base de datos.`);
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Error guardando ruta:', err);
-      setErrorMessage('ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al guardar la ruta.'));
     } finally {
       setIsProcessing(false);
     }
@@ -904,12 +978,20 @@ const MissionPlannerContent: React.FC = () => {
   // ==========================================
   const handleLaunchMission = async () => {
     if (!canEditAndLaunch) {
-      setErrorMessage('ACCESO DENEGADO: solo ADMIN y USER pueden activar misiones.');
+      setErrorMessage('Solo los roles ADMIN y USER tienen permisos para activar misiones.');
       return;
     }
 
-    if (!isValidRoute) {
-      setErrorMessage('No se puede lanzar una misión con advertencias críticas bloqueantes.');
+    if (!canLaunchMission) {
+      if (isBatteryInsufficient) {
+        let msg = `No se puede lanzar la misión: batería insuficiente (requiere ${est_battery_pct}% frente a ${availableBatteryRes.toFixed(1)}% disponible sobre reserva failsafe).`;
+        if (batteryTrimSuggestion) {
+          msg += ` Sugerencia de recorte: reduce al menos ${batteryTrimSuggestion.ticksToTrim} ticks (~${batteryTrimSuggestion.metersToTrim} m) o elimina tiempos de permanencia.`;
+        }
+        setErrorMessage(msg);
+      } else {
+        setErrorMessage(`No se puede lanzar la misión: ${launchBlockingErrors[0] || 'advertencia crítica'}`);
+      }
       return;
     }
 
@@ -935,8 +1017,13 @@ const MissionPlannerContent: React.FC = () => {
           .insert(payload)
           .select();
 
-        if (error || !data || data.length === 0) {
-          setErrorMessage('ACCESO DENEGADO: no se pudo guardar la ruta previa al lanzamiento.');
+        if (error) {
+          setErrorMessage(formatSupabaseError(error, 'Error al guardar la ruta previa al lanzamiento.'));
+          return;
+        }
+
+        if (!data || data.length === 0) {
+          setErrorMessage('No se pudo guardar la ruta previa al lanzamiento (0 filas devueltas).');
           return;
         }
 
@@ -951,8 +1038,7 @@ const MissionPlannerContent: React.FC = () => {
       });
 
       if (rpcError) {
-        console.error('[SkyOS MissionPlanner] RPC Error activate_route:', rpcError);
-        setErrorMessage(rpcError.message || 'Error al activar la ruta en el sistema');
+        setErrorMessage(formatSupabaseError(rpcError, 'Error al activar la ruta mediante la función activate_route.'));
         return;
       }
 
@@ -965,8 +1051,99 @@ const MissionPlannerContent: React.FC = () => {
 
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Excepción en handleLaunchMission:', err);
-      setErrorMessage(err.message || 'ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al activar la ruta.'));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // ==========================================
+  // LANZAR Y DESPEGAR YA (activate_route + dispatch_patrol_now)
+  // ==========================================
+  const handleLaunchAndDispatchNow = async () => {
+    if (!canEditAndLaunch) {
+      setErrorMessage('Solo los roles ADMIN y USER tienen permisos para activar misiones.');
+      return;
+    }
+
+    if (!canLaunchMission) {
+      if (isBatteryInsufficient) {
+        let msg = `No se puede lanzar la misión: batería insuficiente (requiere ${est_battery_pct}% frente a ${availableBatteryRes.toFixed(1)}% disponible sobre reserva failsafe).`;
+        if (batteryTrimSuggestion) {
+          msg += ` Sugerencia de recorte: reduce al menos ${batteryTrimSuggestion.ticksToTrim} ticks (~${batteryTrimSuggestion.metersToTrim} m) o elimina tiempos de permanencia.`;
+        }
+        setErrorMessage(msg);
+      } else {
+        setErrorMessage(`No se puede lanzar la misión: ${launchBlockingErrors[0] || 'advertencia crítica'}`);
+      }
+      return;
+    }
+
+    setIsProcessing(true);
+    setErrorMessage(null);
+
+    try {
+      // 1. Asegurar que la ruta esté guardada
+      let routeIdToActivate = savedRouteId;
+      if (!routeIdToActivate) {
+        const payload: any = {
+          name: routeName.trim() || 'Misión UAV Autogenerada',
+          description: routeDesc.trim() || null,
+          waypoints,
+          distance_m,
+          est_ticks,
+          est_battery_pct,
+          created_by: user?.id || null,
+        };
+
+        const { data, error } = await supabase
+          .from('routes')
+          .insert(payload)
+          .select();
+
+        if (error) {
+          setErrorMessage(formatSupabaseError(error, 'Error al guardar la ruta previa al lanzamiento.'));
+          return;
+        }
+
+        if (!data || data.length === 0) {
+          setErrorMessage('No se pudo guardar la ruta previa al lanzamiento (0 filas devueltas).');
+          return;
+        }
+
+        const newRoute = data[0] as MissionRoute;
+        routeIdToActivate = newRoute.id;
+        setSavedRouteId(newRoute.id);
+      }
+
+      // 2. Invocar RPC activate_route
+      const { error: rpcError } = await supabase.rpc('activate_route', {
+        p_route_id: routeIdToActivate,
+      });
+
+      if (rpcError) {
+        setErrorMessage(formatSupabaseError(rpcError, 'Error al activar la ruta mediante la función activate_route.'));
+        return;
+      }
+
+      // 3. Invocar RPC dispatch_patrol_now para despegue inmediato
+      const { error: dispatchError } = await supabase.rpc('dispatch_patrol_now');
+
+      if (dispatchError) {
+        setErrorMessage(formatSupabaseError(dispatchError, 'Ruta activada, pero falló el despegue inmediato de la patrulla.'));
+        return;
+      }
+
+      // 4. Mensaje según estado del kernel
+      if (kernelStatus === 'OFF') {
+        setSuccessMessage('¡Misión activada y patrulla lista para despegue! ⚠️ Enciende el kernel para iniciar el vuelo.');
+      } else {
+        setSuccessMessage(`¡Misión "${routeName}" lanzada con éxito y despegue inmediato concedido a patrol_manager!`);
+      }
+
+      await fetchSavedRoutes();
+    } catch (err: any) {
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al activar y despegar la patrulla.'));
     } finally {
       setIsProcessing(false);
     }
@@ -1014,7 +1191,7 @@ const MissionPlannerContent: React.FC = () => {
   // Desactivar ruta activa (is_active = false)
   const handleDeactivateRoute = async (r: MissionRoute) => {
     if (!canManageRoute(r)) {
-      setErrorMessage('ACCESO DENEGADO: no tienes permisos para desactivar esta ruta.');
+      setErrorMessage('No tienes permisos suficientes para desactivar esta ruta.');
       return;
     }
 
@@ -1029,21 +1206,19 @@ const MissionPlannerContent: React.FC = () => {
         .select();
 
       if (error) {
-        console.error('[SkyOS MissionPlanner] Error desactivando ruta:', error);
-        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
+        setErrorMessage(formatSupabaseError(error, 'Error al desactivar la ruta.'));
         return;
       }
 
       if (!data || data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO: 0 filas modificadas al desactivar la ruta.');
+        setErrorMessage('No se pudo desactivar la ruta: 0 filas modificadas.');
         return;
       }
 
       setSuccessMessage(`Ruta «${r.name}» desactivada. Ahora puede ser eliminada.`);
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Excepción desactivando ruta:', err);
-      setErrorMessage(err.message || 'ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al desactivar la ruta.'));
     } finally {
       setIsProcessing(false);
     }
@@ -1055,7 +1230,7 @@ const MissionPlannerContent: React.FC = () => {
     const r = routeToDelete;
 
     if (!canManageRoute(r)) {
-      setErrorMessage('ACCESO DENEGADO: no tienes permisos para eliminar esta ruta.');
+      setErrorMessage('No tienes permisos suficientes para eliminar esta ruta.');
       setRouteToDelete(null);
       return;
     }
@@ -1077,13 +1252,12 @@ const MissionPlannerContent: React.FC = () => {
         .select();
 
       if (error) {
-        console.error('[SkyOS MissionPlanner] Error eliminando ruta:', error);
-        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
+        setErrorMessage(formatSupabaseError(error, 'Error al eliminar la ruta.'));
         return;
       }
 
       if (!data || data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO: 0 filas afectadas al eliminar la ruta.');
+        setErrorMessage('No se pudo eliminar la ruta: 0 filas afectadas.');
         return;
       }
 
@@ -1100,8 +1274,7 @@ const MissionPlannerContent: React.FC = () => {
       setRouteToDelete(null);
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Excepción eliminando ruta:', err);
-      setErrorMessage(err.message || 'ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al eliminar la ruta.'));
     } finally {
       setIsProcessing(false);
     }
@@ -1110,7 +1283,7 @@ const MissionPlannerContent: React.FC = () => {
   // Confirmar eliminación de todas las rutas inactivas (SOLO ADMIN)
   const handleConfirmDeleteAllInactive = async () => {
     if (!isAdmin) {
-      setErrorMessage('ACCESO DENEGADO: solo ADMIN puede eliminar todas las rutas inactivas.');
+      setErrorMessage('Solo el rol ADMIN tiene permisos para eliminar todas las rutas inactivas.');
       setShowDeleteAllInactiveModal(false);
       return;
     }
@@ -1126,13 +1299,12 @@ const MissionPlannerContent: React.FC = () => {
         .select();
 
       if (error) {
-        console.error('[SkyOS MissionPlanner] Error eliminando rutas inactivas:', error);
-        setErrorMessage(`ACCESO DENEGADO [${error.code || 'ERR'}]: ${error.message}`);
+        setErrorMessage(formatSupabaseError(error, 'Error al eliminar las rutas inactivas.'));
         return;
       }
 
       if (!data || data.length === 0) {
-        setErrorMessage('ACCESO DENEGADO: 0 filas afectadas al eliminar rutas inactivas.');
+        setErrorMessage('No se eliminó ninguna fila: 0 rutas inactivas afectadas.');
         return;
       }
 
@@ -1149,8 +1321,7 @@ const MissionPlannerContent: React.FC = () => {
       setShowDeleteAllInactiveModal(false);
       await fetchSavedRoutes();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Excepción eliminando rutas inactivas:', err);
-      setErrorMessage(err.message || 'ACCESO DENEGADO');
+      setErrorMessage(formatSupabaseError(err, 'Excepción inesperada al eliminar rutas inactivas.'));
     } finally {
       setIsProcessing(false);
     }
@@ -1161,7 +1332,7 @@ const MissionPlannerContent: React.FC = () => {
   // ==========================================
   const handleSaveFlightModel = async () => {
     if (!isAdmin) {
-      setErrorMessage('ACCESO DENEGADO: solo ADMIN puede modificar el modelo de vuelo.');
+      setErrorMessage('Solo el rol ADMIN puede modificar el modelo de vuelo.');
       return;
     }
 
@@ -1193,10 +1364,9 @@ const MissionPlannerContent: React.FC = () => {
         });
 
       if (error) {
-        // Respeta RLS: si hay error, muestra el mensaje real
-        console.error('[SkyOS MissionPlanner] Error RLS actualizando flight_model:', error);
-        setEditModelError(error.message);
-        setErrorMessage(error.message);
+        const msg = formatSupabaseError(error, 'Error al actualizar el modelo de vuelo.');
+        setEditModelError(msg);
+        setErrorMessage(msg);
         return;
       }
 
@@ -1205,9 +1375,9 @@ const MissionPlannerContent: React.FC = () => {
       setSuccessMessage('Modelo de vuelo actualizado con éxito en system_settings.');
       await fetchFlightModel();
     } catch (err: any) {
-      console.error('[SkyOS MissionPlanner] Excepción guardando flight_model:', err);
-      setEditModelError(err.message || 'Error al guardar modelo de vuelo');
-      setErrorMessage(err.message || 'Error al guardar modelo de vuelo');
+      const msg = formatSupabaseError(err, 'Excepción inesperada al guardar modelo de vuelo.');
+      setEditModelError(msg);
+      setErrorMessage(msg);
     } finally {
       setIsSavingModel(false);
     }
@@ -1305,15 +1475,37 @@ const MissionPlannerContent: React.FC = () => {
             <span>BATERÍA UAV: {batteryPercentage}%</span>
           </div>
 
+          {isBatteryInsufficient && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.3rem',
+                padding: '0.35rem 0.65rem',
+                fontSize: '0.72rem',
+                fontFamily: 'var(--font-mono)',
+                fontWeight: 700,
+                color: 'var(--amber-warn)',
+                backgroundColor: 'rgba(255, 183, 3, 0.12)',
+                border: '1px solid var(--amber-warn)',
+                borderRadius: '2px',
+              }}
+            >
+              ⚠️ No alcanza con la batería actual
+            </span>
+          )}
+
           {/* Botón Guardar Ruta */}
           <button
             onClick={handleSaveRoute}
-            disabled={!canEditAndLaunch || isProcessing || !isValidRoute}
+            disabled={!canEditAndLaunch || isProcessing || !canSaveRoute}
             className="btn-tactical"
             style={{ padding: '0.42rem 0.9rem', fontSize: '0.78rem' }}
             title={
               !canEditAndLaunch
                 ? 'GUEST solo puede visualizar'
+                : !canSaveRoute
+                ? 'Corrige las infracciones estructurales (0 waypoints, exclusión o altura >120m) para guardar'
                 : 'Guardar configuración de ruta en la base de datos'
             }
           >
@@ -1324,25 +1516,53 @@ const MissionPlannerContent: React.FC = () => {
           {/* Botón Lanzar Misión */}
           <button
             onClick={handleLaunchMission}
-            disabled={!canEditAndLaunch || isProcessing || !isValidRoute}
+            disabled={!canEditAndLaunch || isProcessing || !canLaunchMission}
             className="btn-tactical"
             style={{
               padding: '0.42rem 1.15rem',
               fontSize: '0.82rem',
-              backgroundColor: isValidRoute ? 'rgba(0, 255, 136, 0.18)' : 'rgba(100, 116, 139, 0.2)',
-              borderColor: isValidRoute ? 'var(--emerald-radar)' : 'var(--text-dim)',
-              color: isValidRoute ? '#ffffff' : 'var(--text-dim)',
-              boxShadow: isValidRoute ? '0 0 16px rgba(0, 255, 136, 0.35)' : 'none',
+              backgroundColor: canLaunchMission ? 'rgba(0, 255, 136, 0.18)' : 'rgba(100, 116, 139, 0.2)',
+              borderColor: canLaunchMission ? 'var(--emerald-radar)' : 'var(--text-dim)',
+              color: canLaunchMission ? '#ffffff' : 'var(--text-dim)',
+              boxShadow: canLaunchMission ? '0 0 16px rgba(0, 255, 136, 0.35)' : 'none',
             }}
             title={
               !canEditAndLaunch
                 ? 'GUEST solo puede visualizar'
+                : !canLaunchMission
+                ? (launchBlockingErrors[0] || 'Lanzamiento bloqueado por restricciones de ruta o batería')
                 : 'Activar misión vía RPC y cargar ruta en patrol_manager'
             }
           >
             <Rocket size={15} />
             <span>LANZAR MISIÓN</span>
           </button>
+
+          {/* Botón Lanzar y Despegar Ya (Solo ADMIN y USER; GUEST no lo ve) */}
+          {canEditAndLaunch && (
+            <button
+              onClick={handleLaunchAndDispatchNow}
+              disabled={isProcessing || !canLaunchMission}
+              className="btn-tactical"
+              style={{
+                padding: '0.42rem 1.15rem',
+                fontSize: '0.82rem',
+                backgroundColor: canLaunchMission ? 'rgba(0, 229, 255, 0.22)' : 'rgba(100, 116, 139, 0.2)',
+                borderColor: canLaunchMission ? 'var(--cyan-primary)' : 'var(--text-dim)',
+                color: canLaunchMission ? '#ffffff' : 'var(--text-dim)',
+                boxShadow: canLaunchMission ? '0 0 16px var(--cyan-glow)' : 'none',
+              }}
+              title={
+                !canLaunchMission
+                  ? (launchBlockingErrors[0] || 'Lanzamiento bloqueado por restricciones de ruta o batería')
+                  : 'Activar misión y conceder prioridad de CPU inmediata a patrol_manager'
+              }
+              id="btn-lanzar-despegar-ya"
+            >
+              <Zap size={15} />
+              <span>LANZAR Y DESPEGAR YA</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1377,8 +1597,8 @@ const MissionPlannerContent: React.FC = () => {
         </div>
       )}
 
-      {/* Banners dinámicos de Validación (Rojo y Amarillo) */}
-      {blockingErrors.length > 0 && (
+      {/* Banners dinámicos de Validación */}
+      {saveBlockingErrors.length > 0 && (
         <div
           style={{
             padding: '0.75rem 1rem',
@@ -1393,14 +1613,43 @@ const MissionPlannerContent: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: 'var(--crimson-crit)' }}>
             <AlertTriangle size={16} />
             <span style={{ fontFamily: 'var(--font-display)', fontSize: '0.88rem', fontWeight: 700 }}>
-              VALIDACIÓN CRÍTICA (BLOQUEA GUARDAR Y LANZAR)
+              VALIDACIÓN ESTRUCTURAL (BLOQUEA GUARDAR Y LANZAR)
             </span>
           </div>
-          {blockingErrors.map((err, i) => (
+          {saveBlockingErrors.map((err, i) => (
             <div key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.73rem', color: '#fecdd3' }}>
               • {err}
             </div>
           ))}
+        </div>
+      )}
+
+      {saveBlockingErrors.length === 0 && isBatteryInsufficient && (
+        <div
+          style={{
+            padding: '0.75rem 1rem',
+            backgroundColor: 'rgba(255, 183, 3, 0.12)',
+            border: '1px solid var(--amber-warn)',
+            borderRadius: '2px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.35rem',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: 'var(--amber-warn)' }}>
+            <AlertTriangle size={16} />
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: '0.88rem', fontWeight: 700 }}>
+              BLOQUEO DE LANZAMIENTO: BATERÍA INSUFICIENTE (SE PERMITE GUARDAR)
+            </span>
+          </div>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.73rem', color: '#fef08a' }}>
+            • Batería insuficiente: requiere {est_battery_pct}% y la reserva sobre failsafe es de {availableBatteryRes.toFixed(1)}% (Batería actual: {batteryPercentage}% menos 15% de reserva failsafe).
+          </div>
+          {batteryTrimSuggestion && (
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.73rem', color: '#fde047' }}>
+              • Sugerencia de recorte: reduce la trayectoria en al menos {batteryTrimSuggestion.ticksToTrim} ticks (~{batteryTrimSuggestion.metersToTrim} m) o elimina tiempos de permanencia para poder despegar.
+            </div>
+          )}
         </div>
       )}
 
@@ -1481,7 +1730,7 @@ const MissionPlannerContent: React.FC = () => {
               fontFamily: 'var(--font-display)',
               fontSize: '1.25rem',
               fontWeight: 700,
-              color: est_ticks > flightModel.max_ticks_warning ? 'var(--amber-warn)' : '#ffffff',
+              color: est_ticks > safeFlightModel.max_ticks_warning ? 'var(--amber-warn)' : '#ffffff',
               marginTop: '2px',
             }}
           >
@@ -1496,7 +1745,7 @@ const MissionPlannerContent: React.FC = () => {
           style={{
             padding: '0.75rem',
             backgroundColor: 'rgba(15, 23, 42, 0.75)',
-            border: isBatteryInsufficient ? '1px solid var(--crimson-crit)' : '1px solid var(--border-subtle)',
+            border: isBatteryInsufficient ? '1px solid var(--amber-warn)' : '1px solid var(--border-subtle)',
             borderRadius: '2px',
           }}
         >
@@ -1508,7 +1757,7 @@ const MissionPlannerContent: React.FC = () => {
               fontFamily: 'var(--font-display)',
               fontSize: '1.25rem',
               fontWeight: 700,
-              color: isBatteryInsufficient ? 'var(--crimson-crit)' : 'var(--emerald-radar)',
+              color: isBatteryInsufficient ? 'var(--amber-warn)' : 'var(--emerald-radar)',
               marginTop: '2px',
             }}
           >
@@ -1517,6 +1766,26 @@ const MissionPlannerContent: React.FC = () => {
           <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.68rem', color: 'var(--text-dim)' }}>
             Límite seguro: {availableBatteryRes.toFixed(1)}% ({batteryPercentage}% - 15%)
           </div>
+          {isBatteryInsufficient && (
+            <div style={{ marginTop: '0.35rem' }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '0.12rem 0.45rem',
+                  fontSize: '0.62rem',
+                  fontFamily: 'var(--font-mono)',
+                  fontWeight: 700,
+                  color: 'var(--amber-warn)',
+                  backgroundColor: 'rgba(255, 183, 3, 0.12)',
+                  border: '1px solid var(--amber-warn)',
+                  borderRadius: '2px',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                No alcanza con la batería actual
+              </span>
+            </div>
+          )}
         </div>
 
         <div
@@ -2456,8 +2725,35 @@ const MissionPlannerContent: React.FC = () => {
                       </td>
 
                       {/* Batería */}
-                      <td style={{ padding: '0.65rem 0.75rem', fontFamily: 'var(--font-mono)', fontSize: '0.78rem', color: 'var(--emerald-radar)' }}>
-                        {r.est_battery_pct}%
+                      <td style={{ padding: '0.65rem 0.75rem', fontFamily: 'var(--font-mono)' }}>
+                        <div
+                          style={{
+                            fontSize: '0.78rem',
+                            fontWeight: 600,
+                            color: (r.est_battery_pct || 0) > availableBatteryRes ? 'var(--amber-warn)' : 'var(--emerald-radar)',
+                          }}
+                        >
+                          {r.est_battery_pct}%
+                        </div>
+                        {(r.est_battery_pct || 0) > availableBatteryRes && (
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              marginTop: '0.2rem',
+                              padding: '0.12rem 0.4rem',
+                              fontSize: '0.62rem',
+                              fontFamily: 'var(--font-mono)',
+                              fontWeight: 700,
+                              color: 'var(--amber-warn)',
+                              backgroundColor: 'rgba(255, 183, 3, 0.12)',
+                              border: '1px solid var(--amber-warn)',
+                              borderRadius: '2px',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            No alcanza con la batería actual
+                          </span>
+                        )}
                       </td>
 
                       {/* Waypoints */}
